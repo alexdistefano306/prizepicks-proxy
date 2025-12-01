@@ -39,12 +39,12 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
     }
 ]
 
-# Sport config: UI name + expected league_id (None = no strict check)
+# Sport config: display name + expected league_id (None = no strict check)
 SPORTS: Dict[str, Dict[str, Any]] = {
     "nfl": {"name": "NFL", "league_id": "9"},
     "nba": {"name": "NBA", "league_id": "7"},
     "nhl": {"name": "NHL", "league_id": "8"},
-    "cbb": {"name": "CBB", "league_id": None},   # unknown league_id, skip validation
+    "cbb": {"name": "CBB", "league_id": "20"},   # updated league id
     "cfb": {"name": "CFB", "league_id": "15"},
     "soccer": {"name": "Soccer", "league_id": "82"},
     "tennis": {"name": "Tennis", "league_id": "5"},
@@ -129,18 +129,16 @@ def get_current_props() -> List[Dict[str, Any]]:
         if gt >= now:
             filtered.append(p)
         else:
-            # game has started/ended → drop
+            # game has started/ended → drop it
             changed = True
 
     if changed:
         save_props(filtered)
 
-    # Fallback if nothing persisted at all
     if not filtered and not DATA_FILE.exists() and not BACKUP_FILE.exists():
         return DUMMY_PROPS
 
     return filtered
-
 
 # -------------------------------------------------------------------
 # Normalization of PrizePicks JSON
@@ -149,7 +147,6 @@ def get_current_props() -> List[Dict[str, Any]]:
 def _extract_tier_from_attrs(attrs: Dict[str, Any]) -> str:
     """
     Map attributes['odds_Type'] (or variations) into "goblin" / "standard" / "demon".
-    If we can't recognize it, default to "standard".
     """
     raw = (
         attrs.get("odds_Type")
@@ -175,8 +172,7 @@ def _extract_tier_from_attrs(attrs: Dict[str, Any]) -> str:
 def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, Any]]:
     """
     Turn a raw PrizePicks JSON blob into a simple list of props.
-    Enforces that the JSON's league_id matches the selected sport
-    (when we know the league_id).
+    Enforces that the JSON's league_id matches the selected sport (when known).
     """
     if sport_key not in SPORTS:
         raise ValueError(f"Unknown sport key: {sport_key}")
@@ -326,10 +322,10 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 }
             )
         except Exception:
+            # Skip any malformed entry
             continue
 
     return props
-
 
 # -------------------------------------------------------------------
 # Routes
@@ -338,7 +334,6 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 
 # ------------------ Main board (odds table) ------------------------
 
@@ -831,7 +826,6 @@ def board_view():
     </html>
     """
 
-
 @app.get("/props.json")
 def props_json():
     """
@@ -839,7 +833,6 @@ def props_json():
     """
     props = get_current_props()
     return JSONResponse(props)
-
 
 # ------------------ Model board (flat text) ------------------------
 
@@ -873,7 +866,6 @@ def model_board():
         )
         lines.append(line)
     return "\n".join(lines)
-
 
 # ------------------ Upload page ------------------------
 
@@ -976,7 +968,7 @@ def upload_page():
             <option value="nfl">NFL (league_id 9)</option>
             <option value="nba">NBA (league_id 7)</option>
             <option value="nhl">NHL (league_id 8)</option>
-            <option value="cbb">CBB (league_id unknown / not checked)</option>
+            <option value="cbb">CBB (league_id 20)</option>
             <option value="cfb">CFB (league_id 15)</option>
             <option value="soccer">Soccer (league_id 82)</option>
             <option value="tennis">Tennis (league_id 5)</option>
@@ -1044,7 +1036,6 @@ def upload_page():
     </html>
     """
 
-
 @app.post("/update-props")
 async def update_props(request: Request):
     """
@@ -1078,7 +1069,6 @@ async def update_props(request: Request):
     combined = remaining + new_props
     save_props(combined)
 
-    # Return counts using cleaned view (drops expired if any)
     total_live = len(get_current_props())
     return {
         "status": "ok",
@@ -1087,15 +1077,13 @@ async def update_props(request: Request):
         "total": total_live,
     }
 
-
 # ------------------ Export page (multi-sport) ------------------------
 
 @app.get("/export", response_class=HTMLResponse)
 def export_page():
     """
-    Export UI: multi-select sports, generate compact text export for ChatGPT.
+    Export UI: multi-select sports, tier filters, and max size.
     """
-    # Build options from SPORTS config
     options_html = []
     for key, cfg in SPORTS.items():
         name = cfg["name"]
@@ -1151,6 +1139,32 @@ def export_page():
           option {{
             padding: 0.2rem 0.3rem;
           }}
+          .row {{
+            margin-bottom: 0.8rem;
+          }}
+          .tiers {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            font-size: 0.85rem;
+            color: #e5e7eb;
+          }}
+          .tiers label {{
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            margin: 0;
+          }}
+          input[type="number"] {{
+            width: 120px;
+            padding: 0.4rem 0.6rem;
+            border-radius: 0.75rem;
+            border: 1px solid rgba(148,163,184,0.7);
+            background-color: rgba(15,23,42,0.95);
+            color: #e5e7eb;
+            font-size: 0.9rem;
+            outline: none;
+          }}
           button {{
             margin-top: 0.7rem;
             padding: 0.55rem 1.1rem;
@@ -1187,35 +1201,61 @@ def export_page():
         <main>
           <h1>Export Props for ChatGPT</h1>
           <p>
-            Pick one or more sports, then hit <strong>Generate Export</strong>.
-            This will build a compact text export of all <strong>live</strong> props
-            (expired props are removed based on <code>game_time</code>).
+            Pick one or more sports, choose tiers, and (optionally) set a max number of props.
+            This builds a compact export of all <strong>live</strong> props
+            (expired props are removed using <code>game_time</code>).
             Format per line:
             <code>sport,player,team,opponent,stat,line,tier,game_time</code>.
           </p>
-          <label for="sports">Sports (Ctrl/Cmd + click to multi-select)</label>
-          <select id="sports" multiple>
-            {options}
-          </select>
+
+          <div class="row">
+            <label for="sports">Sports (Ctrl/Cmd + click to multi-select)</label>
+            <select id="sports" multiple>
+              {options}
+            </select>
+          </div>
+
+          <div class="row">
+            <label>Tiers</label>
+            <div class="tiers">
+              <label><input type="checkbox" id="tier-goblin" value="goblin" checked /> Goblin</label>
+              <label><input type="checkbox" id="tier-standard" value="standard" checked /> Standard</label>
+              <label><input type="checkbox" id="tier-demon" value="demon" checked /> Demon</label>
+            </div>
+          </div>
+
+          <div class="row">
+            <label for="max">Max props (optional, default 300)</label>
+            <input id="max" type="number" min="1" max="5000" placeholder="300" />
+          </div>
+
           <button type="button" onclick="generateExport()">Generate Export</button>
           <div id="status"></div>
           <textarea id="exportBox" readonly placeholder="Your export will appear here…"></textarea>
 
           <script>
-            async function generateExport() {
+            async function generateExport() {{
               const status = document.getElementById("status");
               const box = document.getElementById("exportBox");
               const select = document.getElementById("sports");
 
-              const selected = Array.from(select.options)
+              const selectedSports = Array.from(select.options)
                 .filter(o => o.selected)
                 .map(o => o.value);
 
-              if (!selected.length) {
+              if (!selectedSports.length) {{
                 status.textContent = "❌ Please select at least one sport.";
                 box.value = "";
                 return;
-              }
+              }}
+
+              const tiers = [];
+              if (document.getElementById("tier-goblin").checked) tiers.push("goblin");
+              if (document.getElementById("tier-standard").checked) tiers.push("standard");
+              if (document.getElementById("tier-demon").checked) tiers.push("demon");
+
+              const maxInput = document.getElementById("max").value.trim();
+              const maxVal = maxInput ? parseInt(maxInput, 10) : 300;
 
               status.textContent = "Building export…";
               box.value = "";
@@ -1224,7 +1264,11 @@ def export_page():
                 const res = await fetch("/export-data", {{
                   method: "POST",
                   headers: {{ "Content-Type": "application/json" }},
-                  body: JSON.stringify({{ sports: selected }})
+                  body: JSON.stringify({{
+                    sports: selectedSports,
+                    tiers: tiers,
+                    max: maxVal
+                  }})
                 }});
                 const data = await res.json();
                 if (!res.ok) {{
@@ -1236,34 +1280,50 @@ def export_page():
               }} catch (e) {{
                 status.textContent = "❌ Network error: " + e;
               }}
-            }
+            }}
           </script>
         </main>
       </body>
     </html>
     """
 
-
 @app.post("/export-data")
 async def export_data(request: Request):
     """
-    Backend for /export. Accepts { "sports": ["nfl", "nba", ...] } and returns
-    a compact text export of all live props for those sports:
+    Backend for /export. Accepts:
+      {
+        "sports": ["nfl", "nba", ...],
+        "tiers": ["goblin", "standard", "demon"],
+        "max": 300
+      }
 
-    sport,player,team,opponent,stat,line,tier,game_time
+    Returns compact text:
+      sport,player,team,opponent,stat,line,tier,game_time
     """
     payload = await request.json()
     sports = payload.get("sports")
+    tiers = payload.get("tiers") or []
+    max_props = payload.get("max") or 300
+
     if not isinstance(sports, list) or not sports:
         raise HTTPException(status_code=400, detail="Field 'sports' must be a non-empty list.")
 
-    # Normalize keys
     requested_keys = {str(s).lower() for s in sports}
     valid_keys = {k for k in SPORTS.keys() if k in requested_keys}
     if not valid_keys:
         raise HTTPException(status_code=400, detail="No valid sports keys provided.")
 
-    # Map to sport display names
+    tier_set = {str(t).lower() for t in tiers if t}
+    if not tier_set:
+        tier_set = {"goblin", "standard", "demon"}
+
+    try:
+        max_props = int(max_props)
+    except Exception:
+        max_props = 300
+    if max_props <= 0:
+        max_props = 300
+
     selected_sport_names = {SPORTS[k]["name"] for k in valid_keys}
     selected_sport_names_lower = {name.lower() for name in selected_sport_names}
 
@@ -1275,8 +1335,24 @@ async def export_data(request: Request):
     filtered: List[Dict[str, Any]] = []
     for p in all_props:
         sname = (p.get("sport") or "").lower()
-        if sname in selected_sport_names_lower:
-            filtered.append(p)
+        if sname not in selected_sport_names_lower:
+            continue
+        tier_raw = str(p.get("tier", "")).lower()
+        if tier_raw not in tier_set:
+            continue
+        filtered.append(p)
+
+    # Sort and cap
+    filtered.sort(
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    if len(filtered) > max_props:
+        filtered = filtered[:max_props]
 
     lines: List[str] = []
     header = "sport,player,team,opponent,stat,line,tier,game_time"
