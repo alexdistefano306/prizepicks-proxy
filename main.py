@@ -2,42 +2,15 @@ from typing import List, Dict, Any
 from pathlib import Path
 import json
 
-import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 
-app = FastAPI(title="PrizePicks Props Proxy")
+app = FastAPI(title="PrizePicks Props Proxy (Upload-Based)")
 
-# =========================
-# Config
-# =========================
-
-# Base PrizePicks projections URL (we'll pass query params separately)
-PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
-
-# Query params – tweak league_id/game_mode if you want different leagues later
-PRIZEPICKS_PARAMS = {
-    "league_id": "9",           # 9 = NFL (change if needed)
-    "per_page": "250",
-    "single_stat": "true",
-    "in_game": "true",
-    "game_mode": "prizepools",
-}
-
-# Your custom User-Agent header
-PRIZEPICKS_HEADERS = {
-    "Accept": "application/json",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/142.0.0.0 Safari/537.36"
-    ),
-}
-
-# Local file we use as a fallback
+# Where we store the latest props on the server
 DATA_FILE = Path(__file__).parent / "props.json"
 
-# Dummy props if everything else fails
+# Fallback dummy props if file is missing or broken
 DUMMY_PROPS: List[Dict[str, Any]] = [
     {
         "id": "dummy-1",
@@ -71,33 +44,18 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
 
 
 # =========================
-# Helper functions
+# Helpers
 # =========================
-
-async def fetch_prizepicks_raw() -> Dict[str, Any]:
-    """
-    Try to fetch raw JSON from PrizePicks.
-    They may still return 4xx (e.g., 403) depending on their rules.
-    """
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(
-            PRIZEPICKS_URL,
-            headers=PRIZEPICKS_HEADERS,
-            params=PRIZEPICKS_PARAMS,
-        )
-
-        if resp.status_code != 200:
-            raise HTTPException(
-                status_code=resp.status_code,
-                detail=f"PrizePicks API error: {resp.status_code} {resp.text[:200]}",
-            )
-
-        return resp.json()
-
 
 def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Convert PrizePicks-style JSON into a flat list of props.
+    Take raw PrizePicks-style JSON:
+      {
+        "data": [... projections ...],
+        "included": [... players/games ...]
+      }
+
+    and convert it into a flat list of props for the model.
     """
     data = raw.get("data", [])
     included = raw.get("included", [])
@@ -105,7 +63,6 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     players: Dict[str, Dict[str, Any]] = {}
     games: Dict[str, Dict[str, Any]] = {}
 
-    # Build lookup tables from included[]
     for item in included:
         itype = item.get("type")
         attrs = item.get("attributes", {})
@@ -158,13 +115,12 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             if line is not None:
                 line = float(line)
 
-            # Skip incomplete entries
             if not player or line is None or not stat:
                 continue
 
-            prop_obj = {
+            props.append({
                 "id": pid,
-                "source": "prizepicks",
+                "source": "uploaded",   # comes from your upload
                 "board": league,
                 "league": league,
                 "player": player,
@@ -175,10 +131,8 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "line": line,
                 "game_time": start_time,
                 "projection_type": "main",
-            }
-            props.append(prop_obj)
+            })
         except Exception:
-            # Skip malformed rows
             continue
 
     return props
@@ -186,7 +140,7 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def load_file_props() -> List[Dict[str, Any]]:
     """
-    Load props from props.json if it exists, else use dummy.
+    Load props from props.json if present, else use dummy.
     """
     if DATA_FILE.exists():
         try:
@@ -197,6 +151,10 @@ def load_file_props() -> List[Dict[str, Any]]:
     return DUMMY_PROPS
 
 
+def save_props(props: List[Dict[str, Any]]) -> None:
+    DATA_FILE.write_text(json.dumps(props, indent=2), encoding="utf-8")
+
+
 # =========================
 # Routes
 # =========================
@@ -205,14 +163,14 @@ def load_file_props() -> List[Dict[str, Any]]:
 def index():
     return """
     <html>
-      <head><title>PrizePicks Props Proxy</title></head>
+      <head><title>Props Proxy</title></head>
       <body>
-        <h1>PrizePicks Props Proxy ✅</h1>
-        <p>Useful endpoints:</p>
+        <h1>Props Proxy ✅</h1>
+        <p>This server serves whatever props are stored in <code>props.json</code>.</p>
         <ul>
           <li><a href="/health">/health</a></li>
-          <li><a href="/raw">/raw</a> (PrizePicks raw JSON, if reachable)</li>
-          <li><a href="/props.json">/props.json</a> (normalized props with fallback)</li>
+          <li><a href="/props.json">/props.json</a></li>
+          <li><a href="/upload">/upload</a> (paste raw PrizePicks JSON here)</li>
         </ul>
       </body>
     </html>
@@ -224,31 +182,79 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/raw")
-async def raw():
-    """
-    Try to return raw PrizePicks JSON using headers.
-    """
-    raw_data = await fetch_prizepicks_raw()
-    return JSONResponse(raw_data)
-
-
 @app.get("/props.json")
-async def props_json():
+def props_json():
     """
-    Main endpoint:
-    - Try PrizePicks with headers
-    - If that fails or returns nothing useful, fall back to props.json or dummy
+    This is what ChatGPT / the model will read.
     """
-    try:
-        raw_data = await fetch_prizepicks_raw()
-        props = normalize_prizepicks(raw_data)
-        if not props:
-            return JSONResponse(load_file_props())
-        return JSONResponse(props)
-    except HTTPException:
-        # PrizePicks returned 4xx/5xx → use local data
-        return JSONResponse(load_file_props())
-    except Exception:
-        # Anything else → use local data
-        return JSONResponse(load_file_props())
+    props = load_file_props()
+    return JSONResponse(props)
+
+
+@app.get("/upload", response_class=HTMLResponse)
+def upload_page():
+    """
+    Simple HTML page with a textarea to paste raw JSON into from your phone.
+    """
+    return """
+    <html>
+      <head>
+        <title>Upload PrizePicks JSON</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <style>
+          body { font-family: sans-serif; padding: 1rem; }
+          textarea { width: 100%; height: 300px; }
+          button { padding: 0.5rem 1rem; margin-top: 0.5rem; }
+          #status { margin-top: 0.5rem; white-space: pre-wrap; }
+        </style>
+      </head>
+      <body>
+        <h2>Upload PrizePicks JSON</h2>
+        <p>Paste the raw JSON from the PrizePicks API below and tap "Upload".</p>
+        <textarea id="raw" placeholder='{"data": [...], "included": [...]}'> </textarea>
+        <br />
+        <button onclick="upload()">Upload</button>
+        <pre id="status"></pre>
+
+        <script>
+          async function upload() {
+            const status = document.getElementById('status');
+            const txt = document.getElementById('raw').value;
+
+            let raw;
+            try {
+              raw = JSON.parse(txt);
+            } catch (e) {
+              status.textContent = "❌ Invalid JSON: " + e;
+              return;
+            }
+
+            status.textContent = "Uploading...";
+            try {
+              const res = await fetch("/update-props", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(raw)
+              });
+              const data = await res.json();
+              status.textContent = "✅ Uploaded " + (data.count ?? 0) + " props.";
+            } catch (e) {
+              status.textContent = "❌ Error: " + e;
+            }
+          }
+        </script>
+      </body>
+    </html>
+    """
+
+
+@app.post("/update-props")
+async def update_props(request: Request):
+    """
+    Accept raw PrizePicks JSON from the client (your phone/browser),
+    normalize it, and save to props.json.
+    """
+    raw = await request.json()
+    props = normalize_prizepicks(raw)
+    save_props(props)
+    return {"status": "ok", "count": len(props)}
