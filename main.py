@@ -3,17 +3,22 @@ from pathlib import Path
 import json
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-app = FastAPI(title="PrizePicks Props Proxy (Multi-Sport Upload)")
+app = FastAPI(title="PrizePicks Props Proxy – Multi-Sport Board")
 
-# Where we store the normalized props
-DATA_FILE = Path(__file__).parent / "props.json"
+# -------------------------------------------------------------------
+# Files
+# -------------------------------------------------------------------
 
-BACKUP_FILE = Path(__file__).parent / "props_backup.json"
+BASE_DIR = Path(__file__).parent
+DATA_FILE = BASE_DIR / "props.json"
+BACKUP_FILE = BASE_DIR / "props_backup.json"
 
+# -------------------------------------------------------------------
+# Config / constants
+# -------------------------------------------------------------------
 
-# Fallback demo props used only if there is no file yet
 DUMMY_PROPS: List[Dict[str, Any]] = [
     {
         "id": "dummy-1",
@@ -49,18 +54,82 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
     },
 ]
 
-# Sport config: label + expected league_id for checking uploads
+# Sport config: UI name + expected league_id (None = no strict check)
 SPORTS: Dict[str, Dict[str, Any]] = {
     "nfl": {"name": "NFL", "league_id": "9"},
     "nba": {"name": "NBA", "league_id": "7"},
     "nhl": {"name": "NHL", "league_id": "8"},
-    "cbb": {"name": "CBB", "league_id": None},   # unknown league_id, so we skip the check
+    "cbb": {"name": "CBB", "league_id": None},   # unknown league_id, skip validation
     "cfb": {"name": "CFB", "league_id": "15"},
     "soccer": {"name": "Soccer", "league_id": "82"},
     "tennis": {"name": "Tennis", "league_id": "5"},
     "cs2": {"name": "CS2", "league_id": "265"},
 }
 
+
+# -------------------------------------------------------------------
+# Helpers: load / save props
+# -------------------------------------------------------------------
+
+def save_props(props: List[Dict[str, Any]]) -> None:
+    """
+    Save props to props.json and keep a backup in props_backup.json.
+    """
+    text = json.dumps(props, indent=2)
+    DATA_FILE.write_text(text, encoding="utf-8")
+    BACKUP_FILE.write_text(text, encoding="utf-8")
+
+
+def load_file_props() -> List[Dict[str, Any]]:
+    """
+    Load props for serving (board/model). Prefer main file, fall back to backup,
+    fall back to dummy props.
+    """
+    # Main file first
+    if DATA_FILE.exists():
+        try:
+            with DATA_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # Backup file next
+    if BACKUP_FILE.exists():
+        try:
+            with BACKUP_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # Final fallback
+    return DUMMY_PROPS
+
+
+def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
+    """
+    Load props for internal merging when updating. Prefer main, then backup.
+    If both fail, return [] instead of dummy props.
+    """
+    if DATA_FILE.exists():
+        try:
+            with DATA_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    if BACKUP_FILE.exists():
+        try:
+            with BACKUP_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    return []
+
+
+# -------------------------------------------------------------------
+# Normalization of PrizePicks JSON
+# -------------------------------------------------------------------
 
 def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, Any]]:
     """
@@ -74,16 +143,22 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     sport_name = sport_cfg["name"]
     expected_league_id = sport_cfg["league_id"]
 
-    data = raw.get("data", [])
-    included = raw.get("included", [])
+    data = raw.get("data", []) or []
+    included = raw.get("included", []) or []
 
-    # --- Validate league_id against the sport (if we know it) ---
+    # --- Validate league_id against the selected sport (where we know it) ---
     league_ids = set()
     for proj in data:
+        attrs = proj.get("attributes", {}) or {}
+        # From relationships
         rel_league = (proj.get("relationships", {}).get("league") or {}).get("data") or {}
-        lid = rel_league.get("id")
-        if lid is not None:
-            league_ids.add(str(lid))
+        lid_rel = rel_league.get("id")
+        if lid_rel is not None:
+            league_ids.add(str(lid_rel))
+        # Sometimes league_id might live in attributes
+        lid_attr = attrs.get("league_id")
+        if lid_attr is not None:
+            league_ids.add(str(lid_attr))
 
     if expected_league_id and league_ids and league_ids != {expected_league_id}:
         raise ValueError(
@@ -101,11 +176,16 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
         attrs = item.get("attributes", {}) or {}
         iid = item.get("id")
 
+        if not iid:
+            continue
+
         # Player info
         if itype in ("new_player", "player"):
             players[iid] = {
                 "name": attrs.get("name"),
-                "team": attrs.get("team") or attrs.get("team_abbreviation") or "",
+                "team": attrs.get("team")
+                or attrs.get("team_abbreviation")
+                or "",
                 "league": attrs.get("league") or sport_name,
             }
 
@@ -137,6 +217,10 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
             attrs = proj.get("attributes", {}) or {}
             rel = proj.get("relationships", {}) or {}
 
+            if not pid:
+                continue
+
+            # Player & game relationships
             player_rel = (rel.get("new_player") or rel.get("player") or {}).get("data") or {}
             game_rel = (rel.get("game") or {}).get("data") or {}
 
@@ -169,7 +253,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 elif team == away_team_abbr:
                     opponent = home_team_abbr
 
-            # Fallback: sometimes the projection's description holds the team
+            # Fallback: sometimes description holds a team abbr
             if not opponent and home_team_abbr and away_team_abbr:
                 desc_team = attrs.get("description")
                 if desc_team == home_team_abbr:
@@ -189,6 +273,9 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
 
             start_time = game_info.get("start_time")
 
+            # Tier (goblin/standard/demon) – if your JSON has it, use it; else standard
+            tier = attrs.get("tier") or "standard"
+
             # Skip incomplete rows
             if not player or line is None or not stat:
                 continue
@@ -204,11 +291,11 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                     "team": team,
                     "opponent": opponent,
                     "stat": stat,
-                    "market": stat.lower().replace(" ", "_"),
+                    "market": str(stat).lower().replace(" ", "_"),
                     "line": line,
                     "game_time": start_time,
                     "projection_type": "main",
-                    "tier": "odds_type",  # default; you can overwrite this in props.json with goblin/demon
+                    "tier": tier,
                 }
             )
         except Exception:
@@ -218,47 +305,15 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     return props
 
 
-def load_file_props() -> List[Dict[str, Any]]:
-    """Used by /props.json – falls back to DUMMY_PROPS if file is missing/bad."""
-    if DATA_FILE.exists():
-        try:
-            with DATA_FILE.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return DUMMY_PROPS
-    return DUMMY_PROPS
-
-
-def load_file_props() -> List[Dict[str, Any]]:
-    # normal file first
-    if DATA_FILE.exists():
-        try:
-            with DATA_FILE.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    # fallback to backup if main file is corrupted or missing
-    if BACKUP_FILE.exists():
-        try:
-            with BACKUP_FILE.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    # final fallback: dummy props
-    return DUMMY_PROPS
-
-
-def save_props(props: List[Dict[str, Any]]) -> None:
-    text = json.dumps(props, indent=2)
-    DATA_FILE.write_text(text, encoding="utf-8")
-    # also keep a backup copy of the last good board
-    BACKUP_FILE.write_text(text, encoding="utf-8")
-
-
-# --------- MAIN BOARD VIEW --------- #
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 def board_view():
+    """
+    Main odds board with filters and tier pills.
+    """
     return """
     <html>
       <head>
@@ -266,9 +321,7 @@ def board_view():
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
-          :root {
-            color-scheme: dark;
-          }
+          :root { color-scheme: dark; }
           * { box-sizing: border-box; }
           body {
             margin: 0;
@@ -304,9 +357,7 @@ def board_view():
             font-size: 0.9rem;
             margin-left: 0.75rem;
           }
-          header nav a:hover {
-            color: #e5e7eb;
-          }
+          header nav a:hover { color: #e5e7eb; }
           main {
             padding: 1.25rem 1.5rem 2rem;
             max-width: 1200px;
@@ -357,9 +408,7 @@ def board_view():
             font-size: 0.9rem;
             outline: none;
           }
-          .controls input::placeholder {
-            color: #6b7280;
-          }
+          .controls input::placeholder { color: #6b7280; }
           .controls button {
             padding: 0.55rem 0.9rem;
             border-radius: 9999px;
@@ -370,9 +419,7 @@ def board_view():
             color: white;
             box-shadow: 0 10px 25px rgba(34,197,94,0.35);
           }
-          .controls button:hover {
-            filter: brightness(1.08);
-          }
+          .controls button:hover { filter: brightness(1.08); }
           .controls small {
             font-size: 0.75rem;
             color: #9ca3af;
@@ -400,19 +447,13 @@ def board_view():
             color: #e5e7eb;
             border-bottom: 1px solid rgba(148, 163, 184, 0.5);
           }
-          tbody tr:nth-child(even) {
-            background-color: rgba(15,23,42,0.96);
-          }
-          tbody tr:nth-child(odd) {
-            background-color: rgba(17,24,39,0.96);
-          }
+          tbody tr:nth-child(even) { background-color: rgba(15,23,42,0.96); }
+          tbody tr:nth-child(odd) { background-color: rgba(17,24,39,0.96); }
           tbody td {
             padding: 0.5rem 0.75rem;
             border-bottom: 1px solid rgba(55, 65, 81, 0.8);
           }
-          tbody tr:hover {
-            background-color: rgba(30,64,175,0.3);
-          }
+          tbody tr:hover { background-color: rgba(30,64,175,0.3); }
           .pill {
             display: inline-flex;
             align-items: center;
@@ -459,22 +500,12 @@ def board_view():
             color: #9ca3af;
             text-decoration: none;
           }
-          .footer a:hover {
-            color: #e5e7eb;
-          }
+          .footer a:hover { color: #e5e7eb; }
           @media (max-width: 768px) {
-            header {
-              padding: 0.9rem 1rem;
-            }
-            main {
-              padding: 1rem;
-            }
-            thead {
-              font-size: 0.78rem;
-            }
-            tbody td {
-              padding: 0.45rem 0.5rem;
-            }
+            header { padding: 0.9rem 1rem; }
+            main { padding: 1rem; }
+            thead { font-size: 0.78rem; }
+            tbody td { padding: 0.45rem 0.5rem; }
           }
         </style>
       </head>
@@ -485,6 +516,7 @@ def board_view():
             <a href="/">Board</a>
             <a href="/upload">Upload JSON</a>
             <a href="/props.json">Raw JSON</a>
+            <a href="/model-board">Model List</a>
           </nav>
         </header>
         <main>
@@ -601,9 +633,7 @@ def board_view():
               select.appendChild(opt);
             }
 
-            if (current) {
-              select.value = current;
-            }
+            if (current) select.value = current;
           }
 
           function renderSportFilter(props) {
@@ -624,9 +654,7 @@ def board_view():
               select.appendChild(opt);
             }
 
-            if (current) {
-              select.value = current;
-            }
+            if (current) select.value = current;
           }
 
           function renderTable(props) {
@@ -659,10 +687,10 @@ def board_view():
               tr.appendChild(tdOpp);
 
               const tdStat = document.createElement("td");
-              const pill = document.createElement("span");
-              pill.className = "pill stat";
-              pill.textContent = p.stat || "";
-              tdStat.appendChild(pill);
+              const pillStat = document.createElement("span");
+              pillStat.className = "pill stat";
+              pillStat.textContent = p.stat || "";
+              tdStat.appendChild(pillStat);
               tr.appendChild(tdStat);
 
               const tdLine = document.createElement("td");
@@ -778,11 +806,48 @@ def health():
 
 @app.get("/props.json")
 def props_json():
+    """
+    Raw JSON that the model (me) will read.
+    """
     props = load_file_props()
     return JSONResponse(props)
 
 
-# --------- UPLOAD PAGE --------- #
+@app.get("/model-board", response_class=PlainTextResponse)
+def model_board():
+    """
+    Simple line-based view of all props, easy for the model to parse.
+
+    Format:
+    id | sport | league | player | team | opponent | stat | market | line | tier | game_time
+    """
+    props = load_file_props()
+    lines = []
+    header = "id | sport | league | player | team | opponent | stat | market | line | tier | game_time"
+    lines.append(header)
+    for p in props:
+        line = " | ".join(
+            [
+                str(p.get("id", "")),
+                str(p.get("sport", "")),
+                str(p.get("league", "")),
+                str(p.get("player", "")),
+                str(p.get("team", "")),
+                str(p.get("opponent", "")),
+                str(p.get("stat", "")),
+                str(p.get("market", "")),
+                str(p.get("line", "")),
+                str(p.get("tier", "")),
+                str(p.get("game_time", "")),
+            ]
+        )
+        lines.append(line)
+    return "\n".join(lines)
+
+
+# -------------------------------------------------------------------
+# Upload page
+# -------------------------------------------------------------------
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page():
@@ -843,9 +908,7 @@ def upload_page():
             font-size: 0.82rem;
             outline: none;
           }
-          textarea::placeholder {
-            color: #6b7280;
-          }
+          textarea::placeholder { color: #6b7280; }
           button {
             margin-top: 0.7rem;
             padding: 0.55rem 1.1rem;
@@ -857,9 +920,7 @@ def upload_page():
             cursor: pointer;
             box-shadow: 0 15px 30px rgba(37,99,235,0.45);
           }
-          button:hover {
-            filter: brightness(1.07);
-          }
+          button:hover { filter: brightness(1.07); }
           #status {
             margin-top: 0.7rem;
             font-size: 0.8rem;
@@ -870,9 +931,7 @@ def upload_page():
             color: #93c5fd;
             text-decoration: none;
           }
-          a:hover {
-            color: #bfdbfe;
-          }
+          a:hover { color: #bfdbfe; }
         </style>
       </head>
       <body>
@@ -881,7 +940,7 @@ def upload_page():
           <p>
             Choose a sport, then paste the raw JSON from the PrizePicks API
             (<code>{"data": [...], "included": [...]}</code>) and tap <strong>Upload</strong>.
-            This will replace any existing props for that sport on the board.
+            This will replace any existing props for that sport on the combined board.
           </p>
           <label for="sport">Sport</label>
           <select id="sport">
@@ -901,7 +960,7 @@ def upload_page():
           <button onclick="upload()">Upload</button>
           <div id="status"></div>
 
-                    <script>
+          <script>
             async function upload() {
               const status = document.getElementById('status');
               const txt = document.getElementById('raw').value;
@@ -940,28 +999,36 @@ def upload_page():
               }
             }
 
-            // NEW: clear textarea + status when sport changes
-            const sportSelect = document.getElementById('sport');
-            const rawTextarea = document.getElementById('raw');
-            const statusDiv = document.getElementById('status');
-            if (sportSelect && rawTextarea) {
-              sportSelect.addEventListener('change', () => {
-                rawTextarea.value = '';
-                if (statusDiv) statusDiv.textContent = '';
-              });
-            }
+            // Clear textarea + status whenever sport changes
+            document.addEventListener("DOMContentLoaded", () => {
+              const sportSelect = document.getElementById('sport');
+              const rawTextarea = document.getElementById('raw');
+              const statusDiv = document.getElementById('status');
+              if (sportSelect && rawTextarea) {
+                sportSelect.addEventListener('change', () => {
+                  rawTextarea.value = '';
+                  if (statusDiv) statusDiv.textContent = '';
+                });
+              }
+            });
           </script>
-
         </main>
       </body>
     </html>
     """
 
 
-# --------- API TO UPDATE PROPS --------- #
+# -------------------------------------------------------------------
+# Update props API
+# -------------------------------------------------------------------
 
 @app.post("/update-props")
 async def update_props(request: Request):
+    """
+    Accept raw PrizePicks JSON from the client (your phone/browser),
+    normalize it for the selected sport, and save to props.json,
+    preserving other sports and updating a backup.
+    """
     payload = await request.json()
     sport_key = payload.get("sport")
     raw = payload.get("raw")
@@ -982,11 +1049,13 @@ async def update_props(request: Request):
 
     existing = load_file_props_raw_or_empty()
     sport_name = SPORTS[sport_key]["name"]
-    # Drop any old props for this sport and replace with the new ones
+
+    # Remove old props for this sport
     remaining = [p for p in existing if p.get("sport") != sport_name]
 
     combined = remaining + new_props
     save_props(combined)
+
     return {
         "status": "ok",
         "sport": sport_name,
