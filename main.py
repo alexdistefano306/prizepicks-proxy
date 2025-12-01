@@ -1,4 +1,6 @@
 from typing import List, Dict, Any
+from pathlib import Path
+import json
 import os
 
 import httpx
@@ -11,15 +13,32 @@ app = FastAPI(title="PrizePicks Props Proxy")
 # Config
 # =========================
 
-# Default: NFL projections URL you gave earlier.
-# You can override this in Render via env var PRIZEPICKS_URL if you ever want.
-DEFAULT_PRIZEPICKS_URL = (
-    "https://api.prizepicks.com/projections"
-    "?league_id=9&per_page=250&single_stat=true&in_game=true&game_mode=prizepools"
-)
-PRIZEPICKS_URL = os.getenv("PRIZEPICKS_URL", DEFAULT_PRIZEPICKS_URL)
+# Base projections URL (we'll pass query params separately)
+PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
 
-# Fallback dummy props in case PrizePicks call fails
+# Query params – you can tweak these if you change league/game_mode/etc.
+PRIZEPICKS_PARAMS = {
+    "league_id": "9",          # 9 = NFL in your earlier link
+    "per_page": "250",
+    "single_stat": "true",
+    "in_game": "true",
+    "game_mode": "prizepools",
+}
+
+# Headers (this is your "browser-like" User-Agent)
+PRIZEPICKS_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/106.0.0.0 Safari/537.36"
+    ),
+}
+
+# File we fall back to if API fails
+DATA_FILE = Path(__file__).parent / "props.json"
+
+# Fallback dummy props if both API and file fail
 DUMMY_PROPS: List[Dict[str, Any]] = [
     {
         "id": "dummy-1",
@@ -53,29 +72,30 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
 
 
 # =========================
-# PrizePicks fetch + normalize
+# Helper functions
 # =========================
 
 async def fetch_prizepicks_raw() -> Dict[str, Any]:
     """
     Fetch raw JSON from PrizePicks.
 
-    NOTE: This will only work if PrizePicks allows server-side access from Render's IPs
-    and you respect their Terms of Service. If they return 403, you'll see it in logs.
+    This may still return 403 or other errors depending on their policies.
+    If it does, we'll catch that and fall back to the file/dummy props.
     """
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "PropsProxy/1.0",
-    }
-
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(PRIZEPICKS_URL, headers=headers)
+        resp = await client.get(
+            PRIZEPICKS_URL,
+            headers=PRIZEPICKS_HEADERS,
+            params=PRIZEPICKS_PARAMS,
+        )
+
         if resp.status_code != 200:
-            # Bubble this up so /raw and /props.json can see errors
+            # Bubble up so /raw and /props.json can see the status
             raise HTTPException(
                 status_code=resp.status_code,
                 detail=f"PrizePicks API error: {resp.status_code} {resp.text[:200]}",
             )
+
         return resp.json()
 
 
@@ -83,11 +103,9 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Convert PrizePicks JSON into a flat list of props.
 
-    This uses common field names from their public API:
-      - raw["data"]           : projections
-      - raw["included"]       : players, games, etc.
-      - attributes.line_score : prop line
-      - attributes.stat_type  : stat name
+    This assumes a structure like:
+      - raw["data"]     : projections
+      - raw["included"] : players, games, etc.
     If their schema changes, tweak this function.
     """
     data = raw.get("data", [])
@@ -96,6 +114,7 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     players: Dict[str, Dict[str, Any]] = {}
     games: Dict[str, Dict[str, Any]] = {}
 
+    # Build lookup tables from included[]
     for item in included:
         itype = item.get("type")
         attrs = item.get("attributes", {})
@@ -148,6 +167,7 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             if line is not None:
                 line = float(line)
 
+            # skip incomplete entries
             if not player or line is None or not stat:
                 continue
 
@@ -167,10 +187,23 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
             props.append(prop_obj)
         except Exception:
-            # Skip malformed rows
+            # skip malformed rows
             continue
 
     return props
+
+
+def load_file_props() -> List[Dict[str, Any]]:
+    """
+    Load props from props.json if it exists, otherwise return DUMMY_PROPS.
+    """
+    if DATA_FILE.exists():
+        try:
+            with DATA_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return DUMMY_PROPS
+    return DUMMY_PROPS
 
 
 # =========================
@@ -187,8 +220,8 @@ def index():
         <p>Useful endpoints:</p>
         <ul>
           <li><a href="/health">/health</a></li>
-          <li><a href="/raw">/raw</a> (raw PrizePicks JSON)</li>
-          <li><a href="/props.json">/props.json</a> (normalized props for ChatGPT)</li>
+          <li><a href="/raw">/raw</a> (raw PrizePicks JSON if reachable)</li>
+          <li><a href="/props.json">/props.json</a> (normalized props with fallback)</li>
         </ul>
       </body>
     </html>
@@ -203,7 +236,7 @@ def health():
 @app.get("/raw")
 async def raw():
     """
-    Debug endpoint: returns raw PrizePicks JSON so you can inspect fields.
+    Debug endpoint: try to return raw PrizePicks JSON.
     """
     raw_data = await fetch_prizepicks_raw()
     return JSONResponse(raw_data)
@@ -212,18 +245,18 @@ async def raw():
 @app.get("/props.json")
 async def props_json():
     """
-    Main endpoint for ChatGPT: normalized list of props.
+    Main endpoint: tries PrizePicks first (with headers), then falls back to props.json or dummy.
     """
     try:
         raw_data = await fetch_prizepicks_raw()
         props = normalize_prizepicks(raw_data)
         if not props:
-            # Fallback to dummy if something changes in the schema
-            return JSONResponse(DUMMY_PROPS)
+            # if normalization produces nothing, fall back
+            return JSONResponse(load_file_props())
         return JSONResponse(props)
     except HTTPException:
-        # Pass through real HTTP errors from PrizePicks
-        raise
+        # If PrizePicks returns 4xx/5xx, fall back to file/dummy
+        return JSONResponse(load_file_props())
     except Exception:
-        # Any other error → fallback to dummy
-        return JSONResponse(DUMMY_PROPS)
+        # Any other error → fall back as well
+        return JSONResponse(load_file_props())
