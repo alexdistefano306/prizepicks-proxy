@@ -20,7 +20,6 @@ BACKUP_FILE = BASE_DIR / "props_backup.json"
 # Config / constants
 # -------------------------------------------------------------------
 
-# Sport config: display name + expected league_id (None = no strict check)
 SPORTS: Dict[str, Dict[str, Any]] = {
     "nfl": {"name": "NFL", "league_id": "9"},
     "nba": {"name": "NBA", "league_id": "7"},
@@ -69,7 +68,7 @@ def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
     return []
 
 
-def _parse_game_time(value: Any) -> Optional[datetime]:
+def _parse_game_time(value: Any) -> Optional[datetime]]:
     """
     Best-effort parse of the game_time string into an aware datetime in UTC.
     Returns None if parsing fails or value is empty.
@@ -972,14 +971,14 @@ def _build_model_page_text(
 def model_board_paged(
     sport: str,
     page: int,
-    page_size: int = 200,
+    page_size: int = 150,
     tiers: str = "",
 ):
     """
     Paged CSV-style model board.
 
     Examples:
-      /model-board/nba/page/1         -> all tiers, 200 props per page
+      /model-board/nba/page/1         -> all tiers, 150 props per page
       /model-board/nba/page/1?tiers=standard+goblin
       /model-board/all/page/1
     """
@@ -997,7 +996,7 @@ def model_board_paged_tiers(
     sport: str,
     tiers: str,
     page: int,
-    page_size: int = 200,
+    page_size: int = 150,
 ):
     """
     Paged CSV-style model board with tiers in the path.
@@ -1521,3 +1520,106 @@ async def export_data(request: Request):
 
     text = "\n".join(lines)
     return {"text": text, "count": len(filtered)}
+
+# -------------------------------------------------------------------
+# JSON model-board endpoint (prop bank for the model)
+# -------------------------------------------------------------------
+
+@app.get("/model-board-json")
+def model_board_json(
+    sports: str = "all",   # e.g. "nba" or "nba,nfl" or "all"
+    tiers: str = "",       # e.g. "standard+goblin" or "goblin"
+):
+    """
+    JSON version of the model board, designed for the model to read.
+
+    Query params:
+      sports: comma-separated sport keys (nfl,nba,nhl,...) OR "all"
+      tiers:  e.g. "standard", "goblin", "demon", "standard+goblin"
+
+    Returns:
+      [
+        {
+          "sport": "...",
+          "player": "...",
+          "team": "...",
+          "opponent": "...",
+          "stat": "...",
+          "market": "...",
+          "line": 0.0,
+          "tier": "...",
+          "game_time": "..."
+        },
+        ...
+      ]
+    """
+    # --- Parse sports ---
+    if sports.lower() == "all":
+        selected_keys = set(SPORTS.keys())
+    else:
+        requested = {s.strip().lower() for s in sports.split(",") if s.strip()}
+        selected_keys = {k for k in SPORTS.keys() if k in requested}
+        if not selected_keys:
+            raise HTTPException(status_code=400, detail="No valid sports in 'sports' param.")
+
+    selected_sport_names = {SPORTS[k]["name"] for k in selected_keys}
+    selected_sport_names_lower = {name.lower() for name in selected_sport_names}
+
+    # --- Parse tiers ---
+    tier_set = set()
+    if tiers:
+        for t in tiers.split("+"):
+            t = t.strip().lower()
+            if not t:
+                continue
+            if t not in ALLOWED_TIERS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
+                )
+            tier_set.add(t)
+    if not tier_set:
+        tier_set = ALLOWED_TIERS.copy()
+
+    # --- Load and filter props ---
+    all_props = get_current_props()
+    filtered: List[Dict[str, Any]] = []
+
+    for p in all_props:
+        sname = (p.get("sport") or "").lower()
+        if sname not in selected_sport_names_lower:
+            continue
+
+        tier_raw = str(p.get("tier", "")).lower()
+        if tier_raw not in tier_set:
+            continue
+
+        filtered.append(p)
+
+    # Sort for consistency
+    filtered.sort(
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    # --- Return simplified objects for the model ---
+    result: List[Dict[str, Any]] = []
+    for p in filtered:
+        result.append(
+            {
+                "sport": p.get("sport"),
+                "player": p.get("player"),
+                "team": p.get("team"),
+                "opponent": p.get("opponent"),
+                "stat": p.get("stat"),
+                "market": p.get("market"),
+                "line": p.get("line"),
+                "tier": p.get("tier"),
+                "game_time": p.get("game_time"),
+            }
+        )
+
+    return result
