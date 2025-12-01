@@ -844,18 +844,22 @@ def props_json():
     return JSONResponse(props)
 
 
-@app.get("/model-board", response_class=PlainTextResponse)
+from fastapi.responses import HTMLResponse  # you already have this at the top
+
+@app.get("/model-board", response_class=HTMLResponse)
 def model_board():
     """
-    Simple line-based view of all props, easy for the model to parse.
+    Simple HTML page of all props, easy for both you and the model to read.
 
-    Format:
+    Each prop is one line inside a <pre> block:
     id | sport | league | player | team | opponent | stat | market | line | tier | game_time
     """
     props = load_file_props()
+
     lines = []
     header = "id | sport | league | player | team | opponent | stat | market | line | tier | game_time"
     lines.append(header)
+
     for p in props:
         line = " | ".join(
             [
@@ -873,7 +877,55 @@ def model_board():
             ]
         )
         lines.append(line)
-    return "\n".join(lines)
+
+    body = "\n".join(lines)
+
+    html = f"""
+    <html>
+      <head>
+        <title>Model Board – Flat Props</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          :root {{ color-scheme: dark; }}
+          body {{
+            margin: 0;
+            padding: 1rem;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+          }}
+          h1 {{
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+          }}
+          .note {{
+            font-size: 0.8rem;
+            color: #9ca3af;
+            margin-bottom: 0.6rem;
+          }}
+          pre {{
+            font-size: 0.8rem;
+            white-space: pre;
+            overflow-x: auto;
+            border-radius: 0.5rem;
+            border: 1px solid #374151;
+            padding: 0.75rem;
+            background: #030712;
+          }}
+        </style>
+      </head>
+      <body>
+        <h1>Model Board – Flat Props</h1>
+        <div class="note">
+          Format: id | sport | league | player | team | opponent | stat | market | line | tier | game_time
+        </div>
+        <pre>{body}</pre>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
 
 
 # -------------------------------------------------------------------
