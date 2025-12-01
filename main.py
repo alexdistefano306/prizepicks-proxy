@@ -10,6 +10,9 @@ app = FastAPI(title="PrizePicks Props Proxy (Multi-Sport Upload)")
 # Where we store the normalized props
 DATA_FILE = Path(__file__).parent / "props.json"
 
+BACKUP_FILE = Path(__file__).parent / "props_backup.json"
+
+
 # Fallback demo props used only if there is no file yet
 DUMMY_PROPS: List[Dict[str, Any]] = [
     {
@@ -205,7 +208,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                     "line": line,
                     "game_time": start_time,
                     "projection_type": "main",
-                    "tier": "standard",  # default; you can overwrite this in props.json with goblin/demon
+                    "tier": "odds_type",  # default; you can overwrite this in props.json with goblin/demon
                 }
             )
         except Exception:
@@ -226,19 +229,30 @@ def load_file_props() -> List[Dict[str, Any]]:
     return DUMMY_PROPS
 
 
-def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
-    """Used when updating – we DO NOT want dummy props here."""
+def load_file_props() -> List[Dict[str, Any]]:
+    # normal file first
     if DATA_FILE.exists():
         try:
             with DATA_FILE.open("r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return []
-    return []
+            pass
+    # fallback to backup if main file is corrupted or missing
+    if BACKUP_FILE.exists():
+        try:
+            with BACKUP_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # final fallback: dummy props
+    return DUMMY_PROPS
 
 
 def save_props(props: List[Dict[str, Any]]) -> None:
-    DATA_FILE.write_text(json.dumps(props, indent=2), encoding="utf-8")
+    text = json.dumps(props, indent=2)
+    DATA_FILE.write_text(text, encoding="utf-8")
+    # also keep a backup copy of the last good board
+    BACKUP_FILE.write_text(text, encoding="utf-8")
 
 
 # --------- MAIN BOARD VIEW --------- #
@@ -887,7 +901,7 @@ def upload_page():
           <button onclick="upload()">Upload</button>
           <div id="status"></div>
 
-          <script>
+                    <script>
             async function upload() {
               const status = document.getElementById('status');
               const txt = document.getElementById('raw').value;
@@ -925,7 +939,19 @@ def upload_page():
                 status.textContent = "❌ Network error: " + e;
               }
             }
+
+            // NEW: clear textarea + status when sport changes
+            const sportSelect = document.getElementById('sport');
+            const rawTextarea = document.getElementById('raw');
+            const statusDiv = document.getElementById('status');
+            if (sportSelect && rawTextarea) {
+              sportSelect.addEventListener('change', () => {
+                rawTextarea.value = '';
+                if (statusDiv) statusDiv.textContent = '';
+              });
+            }
           </script>
+
         </main>
       </body>
     </html>
