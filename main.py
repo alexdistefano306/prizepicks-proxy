@@ -881,7 +881,7 @@ def model_board():
 
 
 @app.get("/model-board/{sport}/{tiers}/page/{page}", response_class=PlainTextResponse)
-def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int = 150):
+def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int = 200):
     """
     Paged CSV-style model board, filtered by sport AND tier(s).
 
