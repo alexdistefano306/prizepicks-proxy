@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 app = FastAPI(title="PrizePicks Props Proxy – Multi-Sport Board")
 
 # -------------------------------------------------------------------
-# Files
+# Files / paths
 # -------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
@@ -20,36 +20,19 @@ BACKUP_FILE = BASE_DIR / "props_backup.json"
 # Config / constants
 # -------------------------------------------------------------------
 
-DUMMY_PROPS: List[Dict[str, Any]] = [
-    {
-        "id": "dummy-1",
-        "source": "demo",
-        "board": "NFL",
-        "league": "NFL",
-        "sport": "NFL",
-        "player": "Joe Burrow",
-        "team": "CIN",
-        "opponent": "BAL",
-        "stat": "Passing Yards",
-        "market": "passing_yards",
-        "line": 255.5,
-        "game_time": "2025-12-01T20:15:00-05:00",
-        "projection_type": "main",
-        "tier": "standard",
-    }
-]
-
 # Sport config: display name + expected league_id (None = no strict check)
 SPORTS: Dict[str, Dict[str, Any]] = {
     "nfl": {"name": "NFL", "league_id": "9"},
     "nba": {"name": "NBA", "league_id": "7"},
     "nhl": {"name": "NHL", "league_id": "8"},
-    "cbb": {"name": "CBB", "league_id": "20"},   # updated CBB league id
+    "cbb": {"name": "CBB", "league_id": "20"},   # CBB league id
     "cfb": {"name": "CFB", "league_id": "15"},
     "soccer": {"name": "Soccer", "league_id": "82"},
     "tennis": {"name": "Tennis", "league_id": "5"},
     "cs2": {"name": "CS2", "league_id": "265"},
 }
+
+ALLOWED_TIERS = {"standard", "goblin", "demon"}
 
 # -------------------------------------------------------------------
 # Helpers: load / save props
@@ -59,14 +42,14 @@ def save_props(props: List[Dict[str, Any]]) -> None:
     """
     Save props to props.json and keep a backup in props_backup.json.
     """
-    text = json.dumps(props, indent=2)
+    text = json.dumps(props, indent=2, ensure_ascii=False)
     DATA_FILE.write_text(text, encoding="utf-8")
     BACKUP_FILE.write_text(text, encoding="utf-8")
 
 
 def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
     """
-    Load props from disk without adding dummy props.
+    Load props from disk without adding any dummy props.
     Prefer main file, then backup. Return [] if nothing valid.
     """
     if DATA_FILE.exists():
@@ -111,11 +94,14 @@ def get_current_props() -> List[Dict[str, Any]]:
     """
     Load props and drop any whose game_time is already in the past.
     Writes the cleaned list back to props.json / props_backup.json.
-    If there are no persisted props, return DUMMY_PROPS for first-run debugging.
+
+    IMPORTANT: No dummy fallback. If nothing is stored, returns [].
     """
     raw = load_file_props_raw_or_empty()
-    now = datetime.now(timezone.utc)
+    if not raw:
+        return []
 
+    now = datetime.now(timezone.utc)
     filtered: List[Dict[str, Any]] = []
     changed = False
 
@@ -125,18 +111,13 @@ def get_current_props() -> List[Dict[str, Any]]:
         if gt is None:
             filtered.append(p)
             continue
-
         if gt >= now:
             filtered.append(p)
         else:
-            # game has started/ended → drop it
             changed = True
 
     if changed:
         save_props(filtered)
-
-    if not filtered and not DATA_FILE.exists() and not BACKUP_FILE.exists():
-        return DUMMY_PROPS
 
     return filtered
 
@@ -192,7 +173,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
         lid_rel = rel_league.get("id")
         if lid_rel is not None:
             league_ids.add(str(lid_rel))
-        # Sometimes league_id might live in attributes
+        # Attributes-level league_id
         lid_attr = attrs.get("league_id")
         if lid_attr is not None:
             league_ids.add(str(lid_attr))
@@ -328,14 +309,23 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     return props
 
 # -------------------------------------------------------------------
-# Routes
+# Small util for CSV cleanup
+# -------------------------------------------------------------------
+
+def _clean_csv_val(v: Any) -> str:
+    return str(v).replace(",", " ").replace("\n", " ").strip()
+
+# -------------------------------------------------------------------
+# Health
 # -------------------------------------------------------------------
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# ------------------ Main board (odds table) ------------------------
+# -------------------------------------------------------------------
+# Main odds board UI
+# -------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 def board_view():
@@ -693,7 +683,7 @@ def board_view():
               const tr = document.createElement("tr");
               const td = document.createElement("td");
               td.colSpan = 8;
-              td.textContent = "No props match the current filters.";
+              td.textContent = "No props match the current filters or nothing has been uploaded yet.";
               tr.appendChild(td);
               tbody.appendChild(tr);
               return;
@@ -834,7 +824,9 @@ def props_json():
     props = get_current_props()
     return JSONResponse(props)
 
-# ------------------ Model board (CSV full + paged) ------------------------
+# -------------------------------------------------------------------
+# Model board (CSV full + paged with tiers)
+# -------------------------------------------------------------------
 
 @app.get("/model-board", response_class=PlainTextResponse)
 def model_board():
@@ -845,9 +837,6 @@ def model_board():
       sport,player,team,opponent,stat,line,tier,game_time
     """
     props = get_current_props()
-
-    def clean(v: Any) -> str:
-        return str(v).replace(",", " ").replace("\n", " ").strip()
 
     props_sorted = sorted(
         props,
@@ -865,14 +854,14 @@ def model_board():
     for p in props_sorted:
         line = ",".join(
             [
-                clean(p.get("sport", "")),
-                clean(p.get("player", "")),
-                clean(p.get("team", "")),
-                clean(p.get("opponent", "")),
-                clean(p.get("stat", "")),
+                _clean_csv_val(p.get("sport", "")),
+                _clean_csv_val(p.get("player", "")),
+                _clean_csv_val(p.get("team", "")),
+                _clean_csv_val(p.get("opponent", "")),
+                _clean_csv_val(p.get("stat", "")),
                 str(p.get("line", "")),
-                clean(p.get("tier", "")),
-                clean(p.get("game_time", "")),
+                _clean_csv_val(p.get("tier", "")),
+                _clean_csv_val(p.get("game_time", "")),
             ]
         )
         lines.append(line)
@@ -880,44 +869,39 @@ def model_board():
     return "\n".join(lines)
 
 
-@app.get("/model-board/{sport}/{tiers}/page/{page}", response_class=PlainTextResponse)
-def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int = 200):
+def _build_model_page_text(
+    sport_key: str,
+    tiers_str: Optional[str],
+    page: int,
+    page_size: int,
+) -> str:
     """
-    Paged CSV-style model board, filtered by sport AND tier(s).
-
-    Examples:
-      /model-board/nba/standard/page/1
-      /model-board/nba/goblin/page/1
-      /model-board/nba/demon/page/1
-      /model-board/nba/standard+goblin/page/1
-      /model-board/nba/goblin+demon/page/1
-      /model-board/nba/standard+demon/page/1
-      /model-board/all/goblin/page/1
+    Shared logic for paged model-board endpoints.
+    Allows optional tier filtering via tiers_str (e.g. "standard", "standard+goblin").
     """
-    sport_key = sport.lower()
+    sport_key = sport_key.lower()
 
     if sport_key != "all" and sport_key not in SPORTS:
         raise HTTPException(status_code=404, detail="Unknown sport key")
 
-    # --- Parse tiers like "standard", "goblin", "demon", "standard+goblin", etc. ---
-    allowed_tiers = {"standard", "goblin", "demon"}
-    parts = [t.strip().lower() for t in tiers.split("+") if t.strip()]
-    tier_set = set()
-
-    for t in parts:
-        if t not in allowed_tiers:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
-            )
-        tier_set.add(t)
-
-    if not tier_set:
-        raise HTTPException(status_code=400, detail="No valid tiers provided.")
+    tier_set: Optional[set] = None
+    if tiers_str:
+        parts = [t.strip().lower() for t in tiers_str.split("+") if t.strip()]
+        tmp = set()
+        for t in parts:
+            if t not in ALLOWED_TIERS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
+                )
+            tmp.add(t)
+        if not tmp:
+            raise HTTPException(status_code=400, detail="No valid tiers provided.")
+        tier_set = tmp
 
     all_props = get_current_props()
 
-    # --- Filter by sport (or 'all') ---
+    # Filter by sport if not 'all'
     if sport_key == "all":
         filtered = all_props
     else:
@@ -927,12 +911,13 @@ def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int =
             if (p.get("sport") or "").lower() == sport_name.lower()
         ]
 
-    # --- Filter by tier(s) ---
-    filtered = [
-        p
-        for p in filtered
-        if str(p.get("tier", "")).lower() in tier_set
-    ]
+    # Filter by tier(s) if provided
+    if tier_set is not None:
+        filtered = [
+            p
+            for p in filtered
+            if str(p.get("tier", "")).lower() in tier_set
+        ]
 
     # Stable sort: sport (for 'all'), then game_time, then player
     filtered.sort(
@@ -945,10 +930,7 @@ def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int =
 
     total = len(filtered)
     if total == 0:
-        # Still return the header so format is consistent
-        return PlainTextResponse(
-            "sport,player,team,opponent,stat,line,tier,game_time\n"
-        )
+        return "sport,player,team,opponent,stat,line,tier,game_time\n"
 
     if page < 1:
         raise HTTPException(status_code=400, detail="Page must be >= 1")
@@ -964,9 +946,6 @@ def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int =
     end = start + page_size
     page_props = filtered[start:end]
 
-    def clean(v: Any) -> str:
-        return str(v).replace(",", " ").replace("\n", " ").strip()
-
     lines: List[str] = []
     header = "sport,player,team,opponent,stat,line,tier,game_time"
     lines.append(header)
@@ -974,22 +953,74 @@ def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int =
     for p in page_props:
         line = ",".join(
             [
-                clean(p.get("sport", "")),
-                clean(p.get("player", "")),
-                clean(p.get("team", "")),
-                clean(p.get("opponent", "")),
-                clean(p.get("stat", "")),
+                _clean_csv_val(p.get("sport", "")),
+                _clean_csv_val(p.get("player", "")),
+                _clean_csv_val(p.get("team", "")),
+                _clean_csv_val(p.get("opponent", "")),
+                _clean_csv_val(p.get("stat", "")),
                 str(p.get("line", "")),
-                clean(p.get("tier", "")),
-                clean(p.get("game_time", "")),
+                _clean_csv_val(p.get("tier", "")),
+                _clean_csv_val(p.get("game_time", "")),
             ]
         )
         lines.append(line)
 
-    return PlainTextResponse("\n".join(lines))
+    return "\n".join(lines)
 
 
-# ------------------ Upload page ------------------------
+@app.get("/model-board/{sport}/page/{page}", response_class=PlainTextResponse)
+def model_board_paged(
+    sport: str,
+    page: int,
+    page_size: int = 200,
+    tiers: str = "",
+):
+    """
+    Paged CSV-style model board.
+
+    Examples:
+      /model-board/nba/page/1         -> all tiers, 200 props per page
+      /model-board/nba/page/1?tiers=standard+goblin
+      /model-board/all/page/1
+    """
+    text = _build_model_page_text(
+        sport_key=sport,
+        tiers_str=tiers or None,
+        page=page,
+        page_size=page_size,
+    )
+    return PlainTextResponse(text)
+
+
+@app.get("/model-board/{sport}/{tiers}/page/{page}", response_class=PlainTextResponse)
+def model_board_paged_tiers(
+    sport: str,
+    tiers: str,
+    page: int,
+    page_size: int = 200,
+):
+    """
+    Paged CSV-style model board with tiers in the path.
+
+    Examples:
+      /model-board/nba/standard/page/1
+      /model-board/nba/goblin/page/1
+      /model-board/nba/demon/page/1
+      /model-board/nba/standard+goblin/page/1
+      /model-board/nba/goblin+demon/page/1
+      /model-board/nba/standard+demon/page/1
+    """
+    text = _build_model_page_text(
+        sport_key=sport,
+        tiers_str=tiers,
+        page=page,
+        page_size=page_size,
+    )
+    return PlainTextResponse(text)
+
+# -------------------------------------------------------------------
+# Upload page
+# -------------------------------------------------------------------
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page():
@@ -1186,7 +1217,7 @@ async def update_props(request: Request):
     sport_name = SPORTS[sport_key]["name"]
 
     # Remove old props for this sport
-    remaining = [p for p in existing if p.get("sport") != sport_name]
+    remaining = [p for p in existing if (p.get("sport") or "").lower() != sport_name.lower()]
 
     combined = remaining + new_props
     save_props(combined)
@@ -1199,18 +1230,18 @@ async def update_props(request: Request):
         "total": total_live,
     }
 
-# ------------------ Export page (multi-sport, mobile-friendly) ------------------------
+# -------------------------------------------------------------------
+# Export page (multi-sport, mobile-friendly)
+# -------------------------------------------------------------------
 
 @app.get("/export", response_class=HTMLResponse)
 def export_page():
     """
     Export UI: pill-style multi-select sports, tier filters, and max size.
     """
-    # Build sport checkbox HTML from SPORTS config
     sport_labels = []
     for key, cfg in SPORTS.items():
         name = cfg["name"]
-        # default to checked so you get everything unless you uncheck
         sport_labels.append(
             f'<label><input type="checkbox" class="sport-checkbox" value="{key}" checked /> {name} ({key})</label>'
         )
@@ -1434,7 +1465,7 @@ async def export_data(request: Request):
 
     tier_set = {str(t).lower() for t in tiers if t}
     if not tier_set:
-        tier_set = {"goblin", "standard", "demon"}
+        tier_set = ALLOWED_TIERS.copy()
 
     try:
         max_props = int(max_props)
@@ -1448,9 +1479,6 @@ async def export_data(request: Request):
 
     all_props = get_current_props()
 
-    def clean(v: Any) -> str:
-        return str(v).replace(",", " ").replace("\n", " ").strip()
-
     filtered: List[Dict[str, Any]] = []
     for p in all_props:
         sname = (p.get("sport") or "").lower()
@@ -1461,7 +1489,6 @@ async def export_data(request: Request):
             continue
         filtered.append(p)
 
-    # Sort and cap
     filtered.sort(
         key=lambda p: (
             (p.get("sport") or ""),
@@ -1480,14 +1507,14 @@ async def export_data(request: Request):
     for p in filtered:
         line = ",".join(
             [
-                clean(p.get("sport", "")),
-                clean(p.get("player", "")),
-                clean(p.get("team", "")),
-                clean(p.get("opponent", "")),
-                clean(p.get("stat", "")),
+                _clean_csv_val(p.get("sport", "")),
+                _clean_csv_val(p.get("player", "")),
+                _clean_csv_val(p.get("team", "")),
+                _clean_csv_val(p.get("opponent", "")),
+                _clean_csv_val(p.get("stat", "")),
                 str(p.get("line", "")),
-                clean(p.get("tier", "")),
-                clean(p.get("game_time", "")),
+                _clean_csv_val(p.get("tier", "")),
+                _clean_csv_val(p.get("game_time", "")),
             ]
         )
         lines.append(line)
