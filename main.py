@@ -997,55 +997,55 @@ def upload_page():
           <div id="status"></div>
 
           <script>
-            async function upload() {{
+            async function upload() {
               const status = document.getElementById('status');
               const txt = document.getElementById('raw').value;
               const sport = document.getElementById('sport').value;
 
-              if (!sport) {{
+              if (!sport) {
                 status.textContent = "❌ Please select a sport.";
                 return;
-              }}
+              }
 
               let raw;
-              try {{
+              try {
                 raw = JSON.parse(txt);
-              }} catch (e) {{
+              } catch (e) {
                 status.textContent = "❌ Invalid JSON: " + e;
                 return;
-              }}
+              }
 
               status.textContent = "Uploading and processing…";
-              try {{
-                const res = await fetch("/update-props", {{
+              try {
+                const res = await fetch("/update-props", {
                   method: "POST",
-                  headers: {{ "Content-Type": "application/json" }},
-                  body: JSON.stringify({{ sport, raw }})
-                }});
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ sport, raw })
+                });
                 const data = await res.json();
-                if (!res.ok) {{
+                if (!res.ok) {
                   status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
                   return;
-                }}
+                }
                 status.textContent =
                   "✅ Uploaded " + (data.count ?? 0) + " " + (data.sport || "") +
                   " props. Total on board: " + (data.total ?? "?") + ".";
-              }} catch (e) {{
+              } catch (e) {
                 status.textContent = "❌ Network error: " + e;
-              }}
-            }}
+              }
+            }
 
-            document.addEventListener("DOMContentLoaded", () => {{
+            document.addEventListener("DOMContentLoaded", () => {
               const sportSelect = document.getElementById('sport');
               const rawTextarea = document.getElementById('raw');
               const statusDiv = document.getElementById('status');
-              if (sportSelect && rawTextarea) {{
-                sportSelect.addEventListener('change', () => {{
+              if (sportSelect && rawTextarea) {
+                sportSelect.addEventListener('change', () => {
                   rawTextarea.value = '';
                   if (statusDiv) statusDiv.textContent = '';
-                }});
-              }}
-            }});
+                });
+              }
+            });
           </script>
         </main>
       </body>
