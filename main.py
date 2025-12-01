@@ -1,7 +1,6 @@
 from typing import List, Dict, Any
 from pathlib import Path
 import json
-import os
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -13,32 +12,32 @@ app = FastAPI(title="PrizePicks Props Proxy")
 # Config
 # =========================
 
-# Base projections URL (we'll pass query params separately)
+# Base PrizePicks projections URL (we'll pass query params separately)
 PRIZEPICKS_URL = "https://api.prizepicks.com/projections"
 
-# Query params – you can tweak these if you change league/game_mode/etc.
+# Query params – tweak league_id/game_mode if you want different leagues later
 PRIZEPICKS_PARAMS = {
-    "league_id": "9",          # 9 = NFL in your earlier link
+    "league_id": "9",           # 9 = NFL (change if needed)
     "per_page": "250",
     "single_stat": "true",
     "in_game": "true",
     "game_mode": "prizepools",
 }
 
-# Headers (this is your "browser-like" User-Agent)
+# Your custom User-Agent header
 PRIZEPICKS_HEADERS = {
     "Accept": "application/json",
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/106.0.0.0 Safari/537.36"
+        "Chrome/142.0.0.0 Safari/537.36"
     ),
 }
 
-# File we fall back to if API fails
+# Local file we use as a fallback
 DATA_FILE = Path(__file__).parent / "props.json"
 
-# Fallback dummy props if both API and file fail
+# Dummy props if everything else fails
 DUMMY_PROPS: List[Dict[str, Any]] = [
     {
         "id": "dummy-1",
@@ -77,10 +76,8 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
 
 async def fetch_prizepicks_raw() -> Dict[str, Any]:
     """
-    Fetch raw JSON from PrizePicks.
-
-    This may still return 403 or other errors depending on their policies.
-    If it does, we'll catch that and fall back to the file/dummy props.
+    Try to fetch raw JSON from PrizePicks.
+    They may still return 4xx (e.g., 403) depending on their rules.
     """
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(
@@ -90,7 +87,6 @@ async def fetch_prizepicks_raw() -> Dict[str, Any]:
         )
 
         if resp.status_code != 200:
-            # Bubble up so /raw and /props.json can see the status
             raise HTTPException(
                 status_code=resp.status_code,
                 detail=f"PrizePicks API error: {resp.status_code} {resp.text[:200]}",
@@ -101,12 +97,7 @@ async def fetch_prizepicks_raw() -> Dict[str, Any]:
 
 def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Convert PrizePicks JSON into a flat list of props.
-
-    This assumes a structure like:
-      - raw["data"]     : projections
-      - raw["included"] : players, games, etc.
-    If their schema changes, tweak this function.
+    Convert PrizePicks-style JSON into a flat list of props.
     """
     data = raw.get("data", [])
     included = raw.get("included", [])
@@ -167,7 +158,7 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             if line is not None:
                 line = float(line)
 
-            # skip incomplete entries
+            # Skip incomplete entries
             if not player or line is None or not stat:
                 continue
 
@@ -187,7 +178,7 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
             props.append(prop_obj)
         except Exception:
-            # skip malformed rows
+            # Skip malformed rows
             continue
 
     return props
@@ -195,7 +186,7 @@ def normalize_prizepicks(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def load_file_props() -> List[Dict[str, Any]]:
     """
-    Load props from props.json if it exists, otherwise return DUMMY_PROPS.
+    Load props from props.json if it exists, else use dummy.
     """
     if DATA_FILE.exists():
         try:
@@ -220,7 +211,7 @@ def index():
         <p>Useful endpoints:</p>
         <ul>
           <li><a href="/health">/health</a></li>
-          <li><a href="/raw">/raw</a> (raw PrizePicks JSON if reachable)</li>
+          <li><a href="/raw">/raw</a> (PrizePicks raw JSON, if reachable)</li>
           <li><a href="/props.json">/props.json</a> (normalized props with fallback)</li>
         </ul>
       </body>
@@ -236,7 +227,7 @@ def health():
 @app.get("/raw")
 async def raw():
     """
-    Debug endpoint: try to return raw PrizePicks JSON.
+    Try to return raw PrizePicks JSON using headers.
     """
     raw_data = await fetch_prizepicks_raw()
     return JSONResponse(raw_data)
@@ -245,18 +236,19 @@ async def raw():
 @app.get("/props.json")
 async def props_json():
     """
-    Main endpoint: tries PrizePicks first (with headers), then falls back to props.json or dummy.
+    Main endpoint:
+    - Try PrizePicks with headers
+    - If that fails or returns nothing useful, fall back to props.json or dummy
     """
     try:
         raw_data = await fetch_prizepicks_raw()
         props = normalize_prizepicks(raw_data)
         if not props:
-            # if normalization produces nothing, fall back
             return JSONResponse(load_file_props())
         return JSONResponse(props)
     except HTTPException:
-        # If PrizePicks returns 4xx/5xx, fall back to file/dummy
+        # PrizePicks returned 4xx/5xx → use local data
         return JSONResponse(load_file_props())
     except Exception:
-        # Any other error → fall back as well
+        # Anything else → use local data
         return JSONResponse(load_file_props())
