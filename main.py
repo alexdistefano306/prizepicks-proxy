@@ -44,7 +44,7 @@ SPORTS: Dict[str, Dict[str, Any]] = {
     "nfl": {"name": "NFL", "league_id": "9"},
     "nba": {"name": "NBA", "league_id": "7"},
     "nhl": {"name": "NHL", "league_id": "8"},
-    "cbb": {"name": "CBB", "league_id": "20"},   # updated league id
+    "cbb": {"name": "CBB", "league_id": "20"},   # updated CBB league id
     "cfb": {"name": "CFB", "league_id": "15"},
     "soccer": {"name": "Soccer", "league_id": "82"},
     "tennis": {"name": "Tennis", "league_id": "5"},
@@ -111,7 +111,7 @@ def get_current_props() -> List[Dict[str, Any]]:
     """
     Load props and drop any whose game_time is already in the past.
     Writes the cleaned list back to props.json / props_backup.json.
-    If there are no persisted props, return DUMMY_PROPS.
+    If there are no persisted props, return DUMMY_PROPS for first-run debugging.
     """
     raw = load_file_props_raw_or_empty()
     now = datetime.now(timezone.utc)
@@ -834,38 +834,135 @@ def props_json():
     props = get_current_props()
     return JSONResponse(props)
 
-# ------------------ Model board (flat text) ------------------------
+# ------------------ Model board (CSV full + paged) ------------------------
 
 @app.get("/model-board", response_class=PlainTextResponse)
 def model_board():
     """
-    Simple line-based view of all live props, easy for parsing.
+    CSV-style model board of all live props (all sports).
 
-    Format:
-    id | sport | league | player | team | opponent | stat | market | line | tier | game_time
+    Format (header + rows):
+      sport,player,team,opponent,stat,line,tier,game_time
     """
     props = get_current_props()
-    lines = []
-    header = "id | sport | league | player | team | opponent | stat | market | line | tier | game_time"
+
+    def clean(v: Any) -> str:
+        return str(v).replace(",", " ").replace("\n", " ").strip()
+
+    props_sorted = sorted(
+        props,
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        ),
+    )
+
+    lines: List[str] = []
+    header = "sport,player,team,opponent,stat,line,tier,game_time"
     lines.append(header)
-    for p in props:
-        line = " | ".join(
+
+    for p in props_sorted:
+        line = ",".join(
             [
-                str(p.get("id", "")),
-                str(p.get("sport", "")),
-                str(p.get("league", "")),
-                str(p.get("player", "")),
-                str(p.get("team", "")),
-                str(p.get("opponent", "")),
-                str(p.get("stat", "")),
-                str(p.get("market", "")),
+                clean(p.get("sport", "")),
+                clean(p.get("player", "")),
+                clean(p.get("team", "")),
+                clean(p.get("opponent", "")),
+                clean(p.get("stat", "")),
                 str(p.get("line", "")),
-                str(p.get("tier", "")),
-                str(p.get("game_time", "")),
+                clean(p.get("tier", "")),
+                clean(p.get("game_time", "")),
             ]
         )
         lines.append(line)
+
     return "\n".join(lines)
+
+
+@app.get("/model-board/{sport}/page/{page}", response_class=PlainTextResponse)
+def model_board_paged(sport: str, page: int, page_size: int = 80):
+    """
+    Paged CSV-style model board.
+
+    Example:
+      /model-board/nba/page/1
+      /model-board/nfl/page/2
+      /model-board/all/page/1
+
+    Format (header + rows):
+      sport,player,team,opponent,stat,line,tier,game_time
+    """
+    sport_key = sport.lower()
+
+    if sport_key != "all" and sport_key not in SPORTS:
+        raise HTTPException(status_code=404, detail="Unknown sport key")
+
+    all_props = get_current_props()
+
+    # Filter by sport if not 'all'
+    if sport_key == "all":
+        filtered = all_props
+    else:
+        sport_name = SPORTS[sport_key]["name"]
+        filtered = [
+            p for p in all_props
+            if (p.get("sport") or "").lower() == sport_name.lower()
+        ]
+
+    # Stable sort: sport (for 'all'), then game_time, then player
+    filtered.sort(
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    total = len(filtered)
+    if total == 0:
+        # Still return the header so the format is consistent
+        return PlainTextResponse(
+            "sport,player,team,opponent,stat,line,tier,game_time\n"
+        )
+
+    if page < 1:
+        raise HTTPException(status_code=400, detail="Page must be >= 1")
+
+    total_pages = (total + page_size - 1) // page_size
+    if page > total_pages:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Page {page} out of range (total_pages={total_pages})",
+        )
+
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_props = filtered[start:end]
+
+    def clean(v: Any) -> str:
+        return str(v).replace(",", " ").replace("\n", " ").strip()
+
+    lines: List[str] = []
+    header = "sport,player,team,opponent,stat,line,tier,game_time"
+    lines.append(header)
+
+    for p in page_props:
+        line = ",".join(
+            [
+                clean(p.get("sport", "")),
+                clean(p.get("player", "")),
+                clean(p.get("team", "")),
+                clean(p.get("opponent", "")),
+                clean(p.get("stat", "")),
+                str(p.get("line", "")),
+                clean(p.get("tier", "")),
+                clean(p.get("game_time", "")),
+            ]
+        )
+        lines.append(line)
+
+    return PlainTextResponse("\n".join(lines))
 
 # ------------------ Upload page ------------------------
 
@@ -1077,18 +1174,22 @@ async def update_props(request: Request):
         "total": total_live,
     }
 
-# ------------------ Export page (multi-sport) ------------------------
+# ------------------ Export page (multi-sport, mobile-friendly) ------------------------
 
 @app.get("/export", response_class=HTMLResponse)
 def export_page():
     """
-    Export UI: multi-select sports, tier filters, and max size.
+    Export UI: pill-style multi-select sports, tier filters, and max size.
     """
-    options_html = []
+    # Build sport checkbox HTML from SPORTS config
+    sport_labels = []
     for key, cfg in SPORTS.items():
         name = cfg["name"]
-        options_html.append(f'<option value="{key}">{name} ({key})</option>')
-    options = "\n".join(options_html)
+        # default to checked so you get everything unless you uncheck
+        sport_labels.append(
+            f'<label><input type="checkbox" class="sport-checkbox" value="{key}" checked /> {name} ({key})</label>'
+        )
+    sports_html = "\n".join(sport_labels)
 
     return f"""
     <html>
@@ -1125,35 +1226,28 @@ def export_page():
             font-size: 0.85rem;
             color: #9ca3af;
           }}
-          select {{
-            width: 100%;
-            min-height: 7rem;
-            border-radius: 0.75rem;
-            border: 1px solid rgba(148,163,184,0.7);
-            background-color: rgba(15,23,42,0.95);
-            color: #e5e7eb;
-            font-size: 0.9rem;
-            outline: none;
-            padding: 0.4rem 0.6rem;
-          }}
-          option {{
-            padding: 0.2rem 0.3rem;
-          }}
           .row {{
-            margin-bottom: 0.8rem;
+            margin-bottom: 0.9rem;
           }}
-          .tiers {{
+          .pill-group {{
             display: flex;
             flex-wrap: wrap;
             gap: 0.6rem;
             font-size: 0.85rem;
             color: #e5e7eb;
           }}
-          .tiers label {{
-            display: flex;
+          .pill-group label {{
+            display: inline-flex;
             align-items: center;
             gap: 0.35rem;
+            padding: 0.3rem 0.7rem;
+            border-radius: 9999px;
+            border: 1px solid rgba(148,163,184,0.7);
+            background-color: rgba(15,23,42,0.95);
             margin: 0;
+          }}
+          .pill-group input[type="checkbox"] {{
+            accent-color: #22c55e;
           }}
           input[type="number"] {{
             width: 120px;
@@ -1201,23 +1295,22 @@ def export_page():
         <main>
           <h1>Export Props for ChatGPT</h1>
           <p>
-            Pick one or more sports, choose tiers, and (optionally) set a max number of props.
-            This builds a compact export of all <strong>live</strong> props
-            (expired props are removed using <code>game_time</code>).
-            Format per line:
+            Tap the sports and tiers you want, optionally set a max number of props,
+            then tap <strong>Generate Export</strong>. Expired props are removed using
+            <code>game_time</code>. Format per line:
             <code>sport,player,team,opponent,stat,line,tier,game_time</code>.
           </p>
 
           <div class="row">
-            <label for="sports">Sports (Ctrl/Cmd + click to multi-select)</label>
-            <select id="sports" multiple>
-              {options}
-            </select>
+            <label>Sports</label>
+            <div class="pill-group" id="sports-group">
+              {sports_html}
+            </div>
           </div>
 
           <div class="row">
             <label>Tiers</label>
-            <div class="tiers">
+            <div class="pill-group">
               <label><input type="checkbox" id="tier-goblin" value="goblin" checked /> Goblin</label>
               <label><input type="checkbox" id="tier-standard" value="standard" checked /> Standard</label>
               <label><input type="checkbox" id="tier-demon" value="demon" checked /> Demon</label>
@@ -1237,11 +1330,12 @@ def export_page():
             async function generateExport() {{
               const status = document.getElementById("status");
               const box = document.getElementById("exportBox");
-              const select = document.getElementById("sports");
 
-              const selectedSports = Array.from(select.options)
-                .filter(o => o.selected)
-                .map(o => o.value);
+              const selectedSports = Array.from(
+                document.querySelectorAll(".sport-checkbox")
+              )
+                .filter(cb => cb.checked)
+                .map(cb => cb.value);
 
               if (!selectedSports.length) {{
                 status.textContent = "❌ Please select at least one sport.";
