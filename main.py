@@ -880,27 +880,44 @@ def model_board():
     return "\n".join(lines)
 
 
-@app.get("/model-board/{sport}/page/{page}", response_class=PlainTextResponse)
-def model_board_paged(sport: str, page: int, page_size: int = 80):
+@app.get("/model-board/{sport}/{tiers}/page/{page}", response_class=PlainTextResponse)
+def model_board_paged_tiered(sport: str, tiers: str, page: int, page_size: int = 150):
     """
-    Paged CSV-style model board.
+    Paged CSV-style model board, filtered by sport AND tier(s).
 
-    Example:
-      /model-board/nba/page/1
-      /model-board/nfl/page/2
-      /model-board/all/page/1
-
-    Format (header + rows):
-      sport,player,team,opponent,stat,line,tier,game_time
+    Examples:
+      /model-board/nba/standard/page/1
+      /model-board/nba/goblin/page/1
+      /model-board/nba/demon/page/1
+      /model-board/nba/standard+goblin/page/1
+      /model-board/nba/goblin+demon/page/1
+      /model-board/nba/standard+demon/page/1
+      /model-board/all/goblin/page/1
     """
     sport_key = sport.lower()
 
     if sport_key != "all" and sport_key not in SPORTS:
         raise HTTPException(status_code=404, detail="Unknown sport key")
 
+    # --- Parse tiers like "standard", "goblin", "demon", "standard+goblin", etc. ---
+    allowed_tiers = {"standard", "goblin", "demon"}
+    parts = [t.strip().lower() for t in tiers.split("+") if t.strip()]
+    tier_set = set()
+
+    for t in parts:
+        if t not in allowed_tiers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
+            )
+        tier_set.add(t)
+
+    if not tier_set:
+        raise HTTPException(status_code=400, detail="No valid tiers provided.")
+
     all_props = get_current_props()
 
-    # Filter by sport if not 'all'
+    # --- Filter by sport (or 'all') ---
     if sport_key == "all":
         filtered = all_props
     else:
@@ -909,6 +926,13 @@ def model_board_paged(sport: str, page: int, page_size: int = 80):
             p for p in all_props
             if (p.get("sport") or "").lower() == sport_name.lower()
         ]
+
+    # --- Filter by tier(s) ---
+    filtered = [
+        p
+        for p in filtered
+        if str(p.get("tier", "")).lower() in tier_set
+    ]
 
     # Stable sort: sport (for 'all'), then game_time, then player
     filtered.sort(
@@ -921,7 +945,7 @@ def model_board_paged(sport: str, page: int, page_size: int = 80):
 
     total = len(filtered)
     if total == 0:
-        # Still return the header so the format is consistent
+        # Still return the header so format is consistent
         return PlainTextResponse(
             "sport,player,team,opponent,stat,line,tier,game_time\n"
         )
@@ -963,6 +987,7 @@ def model_board_paged(sport: str, page: int, page_size: int = 80):
         lines.append(line)
 
     return PlainTextResponse("\n".join(lines))
+
 
 # ------------------ Upload page ------------------------
 
