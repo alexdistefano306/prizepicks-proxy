@@ -26,6 +26,7 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
         "line": 255.5,
         "game_time": "2025-12-01T20:15:00-05:00",
         "projection_type": "main",
+        "tier": "standard",
     },
     {
         "id": "dummy-2",
@@ -41,6 +42,7 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
         "line": 74.5,
         "game_time": "2025-12-01T20:15:00-05:00",
         "projection_type": "main",
+        "tier": "standard",
     },
 ]
 
@@ -203,6 +205,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                     "line": line,
                     "game_time": start_time,
                     "projection_type": "main",
+                    "tier": "standard",  # default; you can overwrite this in props.json with goblin/demon
                 }
             )
         except Exception:
@@ -417,6 +420,18 @@ def board_view():
             border-color: rgba(251,191,36,0.85);
             color: #fed7aa;
           }
+          .pill.tier-standard {
+            border-color: rgba(148,163,184,0.9);
+            color: #e5e7eb;
+          }
+          .pill.tier-goblin {
+            border-color: rgba(251,191,36,0.9);
+            color: #fed7aa;
+          }
+          .pill.tier-demon {
+            border-color: rgba(248,113,113,0.9);
+            color: #fecaca;
+          }
           .footer {
             margin-top: 0.75rem;
             font-size: 0.75rem;
@@ -498,12 +513,13 @@ def board_view():
                   <th>Opponent</th>
                   <th>Stat</th>
                   <th>Line</th>
+                  <th>Tier</th>
                   <th>Game Time</th>
                   <th>Sport</th>
                 </tr>
               </thead>
               <tbody id="props-body">
-                <tr><td colspan="7">Loading…</td></tr>
+                <tr><td colspan="8">Loading…</td></tr>
               </tbody>
             </table>
           </div>
@@ -530,6 +546,11 @@ def board_view():
             } catch (e) {
               return isoString;
             }
+          }
+
+          function getTierRaw(p) {
+            if (!p.tier) return "";
+            return String(p.tier).toLowerCase();
           }
 
           function renderSummary(props) {
@@ -601,7 +622,7 @@ def board_view():
             if (!props.length) {
               const tr = document.createElement("tr");
               const td = document.createElement("td");
-              td.colSpan = 7;
+              td.colSpan = 8;
               td.textContent = "No props match the current filters.";
               tr.appendChild(td);
               tbody.appendChild(tr);
@@ -633,6 +654,28 @@ def board_view():
               const tdLine = document.createElement("td");
               tdLine.textContent = p.line != null ? p.line : "";
               tr.appendChild(tdLine);
+
+              const tdTier = document.createElement("td");
+              const tierRaw = getTierRaw(p);
+              if (tierRaw) {
+                const pillTier = document.createElement("span");
+                let cls = "pill tier-standard";
+                let label = tierRaw;
+                if (tierRaw === "goblin") {
+                  cls = "pill tier-goblin";
+                  label = "Goblin";
+                } else if (tierRaw === "demon") {
+                  cls = "pill tier-demon";
+                  label = "Demon";
+                } else if (tierRaw === "standard") {
+                  cls = "pill tier-standard";
+                  label = "Standard";
+                }
+                pillTier.className = cls;
+                pillTier.textContent = label;
+                tdTier.appendChild(pillTier);
+              }
+              tr.appendChild(tdTier);
 
               const tdTime = document.createElement("td");
               if (p.game_time) {
