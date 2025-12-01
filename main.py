@@ -1,5 +1,6 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path
+from datetime import datetime, timezone
 import json
 
 from fastapi import FastAPI, Request, HTTPException
@@ -35,23 +36,7 @@ DUMMY_PROPS: List[Dict[str, Any]] = [
         "game_time": "2025-12-01T20:15:00-05:00",
         "projection_type": "main",
         "tier": "standard",
-    },
-    {
-        "id": "dummy-2",
-        "source": "demo",
-        "board": "NFL",
-        "league": "NFL",
-        "sport": "NFL",
-        "player": "Ja'Marr Chase",
-        "team": "CIN",
-        "opponent": "BAL",
-        "stat": "Receiving Yards",
-        "market": "receiving_yards",
-        "line": 74.5,
-        "game_time": "2025-12-01T20:15:00-05:00",
-        "projection_type": "main",
-        "tier": "standard",
-    },
+    }
 ]
 
 # Sport config: UI name + expected league_id (None = no strict check)
@@ -79,35 +64,10 @@ def save_props(props: List[Dict[str, Any]]) -> None:
     BACKUP_FILE.write_text(text, encoding="utf-8")
 
 
-def load_file_props() -> List[Dict[str, Any]]:
-    """
-    Load props for serving (board/model). Prefer main file, fall back to backup,
-    fall back to dummy props.
-    """
-    # Main file first
-    if DATA_FILE.exists():
-        try:
-            with DATA_FILE.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-
-    # Backup file next
-    if BACKUP_FILE.exists():
-        try:
-            with BACKUP_FILE.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-
-    # Final fallback
-    return DUMMY_PROPS
-
-
 def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
     """
-    Load props for internal merging when updating. Prefer main, then backup.
-    If both fail, return [] instead of dummy props.
+    Load props from disk without adding dummy props.
+    Prefer main file, then backup. Return [] if nothing valid.
     """
     if DATA_FILE.exists():
         try:
@@ -126,6 +86,62 @@ def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
     return []
 
 
+def _parse_game_time(value: Any) -> Optional[datetime]:
+    """
+    Best-effort parse of the game_time string into an aware datetime in UTC.
+    Returns None if parsing fails or value is empty.
+    """
+    if not value:
+        return None
+    try:
+        s = str(value).strip()
+        # Handle trailing 'Z'
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        # If naive, assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def get_current_props() -> List[Dict[str, Any]]:
+    """
+    Load props and drop any whose game_time is already in the past.
+    Writes the cleaned list back to props.json / props_backup.json.
+    If there are no persisted props, return DUMMY_PROPS.
+    """
+    raw = load_file_props_raw_or_empty()
+    now = datetime.now(timezone.utc)
+
+    filtered: List[Dict[str, Any]] = []
+    changed = False
+
+    for p in raw:
+        gt = _parse_game_time(p.get("game_time"))
+        # If no game time or unparsable, keep it (safer than deleting)
+        if gt is None:
+            filtered.append(p)
+            continue
+
+        if gt >= now:
+            filtered.append(p)
+        else:
+            # game has started/ended → drop
+            changed = True
+
+    if changed:
+        save_props(filtered)
+
+    # Fallback if nothing persisted at all
+    if not filtered and not DATA_FILE.exists() and not BACKUP_FILE.exists():
+        return DUMMY_PROPS
+
+    return filtered
+
+
 # -------------------------------------------------------------------
 # Normalization of PrizePicks JSON
 # -------------------------------------------------------------------
@@ -133,8 +149,6 @@ def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
 def _extract_tier_from_attrs(attrs: Dict[str, Any]) -> str:
     """
     Map attributes['odds_Type'] (or variations) into "goblin" / "standard" / "demon".
-
-    Expected values: e.g. "Goblin", "Standard", "Demon" (or lowercase).
     If we can't recognize it, default to "standard".
     """
     raw = (
@@ -155,18 +169,14 @@ def _extract_tier_from_attrs(attrs: Dict[str, Any]) -> str:
     if "standard" in t or "normal" in t:
         return "standard"
 
-    # Unknown label -> treat as standard so UI doesn't break
     return "standard"
 
 
 def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, Any]]:
     """
     Turn a raw PrizePicks JSON blob into a simple list of props.
-    Also enforces that the JSON's league_id matches the selected sport
+    Enforces that the JSON's league_id matches the selected sport
     (when we know the league_id).
-
-    We expect prizepicks JSON with:
-      { "data": [...], "included": [...] }
     """
     if sport_key not in SPORTS:
         raise ValueError(f"Unknown sport key: {sport_key}")
@@ -177,7 +187,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     data = raw.get("data", []) or []
     included = raw.get("included", []) or []
 
-    # --- Validate league_id against the selected sport (where we know it) ---
+    # --- Validate league_id where we know it ---
     league_ids = set()
     for proj in data:
         attrs = proj.get("attributes", {}) or {}
@@ -206,11 +216,9 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
         itype = item.get("type")
         attrs = item.get("attributes", {}) or {}
         iid = item.get("id")
-
         if not iid:
             continue
 
-        # Player info
         if itype in ("new_player", "player"):
             players[iid] = {
                 "name": attrs.get("name"),
@@ -219,16 +227,12 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 or "",
                 "league": attrs.get("league") or sport_name,
             }
-
-        # Team info (for mapping opponents)
         elif itype == "team":
             teams[iid] = {
                 "abbreviation": attrs.get("abbreviation") or "",
                 "name": attrs.get("name") or "",
                 "market": attrs.get("market") or "",
             }
-
-        # Game info + which teams are home/away
         elif itype == "game":
             rel = item.get("relationships", {}) or {}
             home_rel = (rel.get("home_team_data") or {}).get("data") or {}
@@ -247,11 +251,9 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
             pid = proj.get("id")
             attrs = proj.get("attributes", {}) or {}
             rel = proj.get("relationships", {}) or {}
-
             if not pid:
                 continue
 
-            # Player & game relationships
             player_rel = (rel.get("new_player") or rel.get("player") or {}).get("data") or {}
             game_rel = (rel.get("game") or {}).get("data") or {}
 
@@ -265,7 +267,6 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
             team = player_info.get("team") or ""
             league = player_info.get("league") or sport_name
 
-            # Resolve home/away teams to abbreviations
             home_team_abbr = None
             away_team_abbr = None
             if game_info:
@@ -276,7 +277,6 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 if away_team_id and away_team_id in teams:
                     away_team_abbr = teams[away_team_id]["abbreviation"]
 
-            # Figure out opponent
             opponent = ""
             if team and home_team_abbr and away_team_abbr:
                 if team == home_team_abbr:
@@ -284,7 +284,6 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 elif team == away_team_abbr:
                     opponent = home_team_abbr
 
-            # Fallback: sometimes description holds a team abbr
             if not opponent and home_team_abbr and away_team_abbr:
                 desc_team = attrs.get("description")
                 if desc_team == home_team_abbr:
@@ -303,11 +302,8 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 line = float(line)
 
             start_time = game_info.get("start_time")
-
-            # Tier from odds_Type
             tier = _extract_tier_from_attrs(attrs)
 
-            # Skip incomplete rows
             if not player or line is None or not stat:
                 continue
 
@@ -330,7 +326,6 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 }
             )
         except Exception:
-            # If a single row blows up, just skip it
             continue
 
     return props
@@ -340,10 +335,17 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
 # Routes
 # -------------------------------------------------------------------
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# ------------------ Main board (odds table) ------------------------
+
 @app.get("/", response_class=HTMLResponse)
 def board_view():
     """
-    Main odds board with filters and tier pills.
+    Main odds board UI. Data is fetched from /props.json (which uses get_current_props()).
     """
     return """
     <html>
@@ -546,7 +548,7 @@ def board_view():
           <nav>
             <a href="/">Board</a>
             <a href="/upload">Upload JSON</a>
-            <a href="/props.json">Raw JSON</a>
+            <a href="/export">Export</a>
             <a href="/model-board">Model List</a>
           </nav>
         </header>
@@ -603,7 +605,7 @@ def board_view():
 
           <div class="footer">
             <span id="footer-count"></span>
-            <span>Upload new boards at <a href="/upload">/upload</a>.</span>
+            <span>Upload new boards at <a href="/upload">/upload</a>. Export for ChatGPT at <a href="/export">/export</a>.</span>
           </div>
         </main>
 
@@ -830,36 +832,29 @@ def board_view():
     """
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
 @app.get("/props.json")
 def props_json():
     """
-    Raw JSON that the model (me) will read.
+    Raw JSON for the live board, with expired props removed.
     """
-    props = load_file_props()
+    props = get_current_props()
     return JSONResponse(props)
 
 
-from fastapi.responses import HTMLResponse  # you already have this at the top
+# ------------------ Model board (flat text) ------------------------
 
-@app.get("/model-board", response_class=HTMLResponse)
+@app.get("/model-board", response_class=PlainTextResponse)
 def model_board():
     """
-    Simple HTML page of all props, easy for both you and the model to read.
+    Simple line-based view of all live props, easy for parsing.
 
-    Each prop is one line inside a <pre> block:
+    Format:
     id | sport | league | player | team | opponent | stat | market | line | tier | game_time
     """
-    props = load_file_props()
-
+    props = get_current_props()
     lines = []
     header = "id | sport | league | player | team | opponent | stat | market | line | tier | game_time"
     lines.append(header)
-
     for p in props:
         line = " | ".join(
             [
@@ -877,60 +872,10 @@ def model_board():
             ]
         )
         lines.append(line)
-
-    body = "\n".join(lines)
-
-    html = f"""
-    <html>
-      <head>
-        <title>Model Board – Flat Props</title>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <style>
-          :root {{ color-scheme: dark; }}
-          body {{
-            margin: 0;
-            padding: 1rem;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #020617;
-            color: #e5e7eb;
-          }}
-          h1 {{
-            font-size: 1.1rem;
-            margin-bottom: 0.5rem;
-          }}
-          .note {{
-            font-size: 0.8rem;
-            color: #9ca3af;
-            margin-bottom: 0.6rem;
-          }}
-          pre {{
-            font-size: 0.8rem;
-            white-space: pre;
-            overflow-x: auto;
-            border-radius: 0.5rem;
-            border: 1px solid #374151;
-            padding: 0.75rem;
-            background: #030712;
-          }}
-        </style>
-      </head>
-      <body>
-        <h1>Model Board – Flat Props</h1>
-        <div class="note">
-          Format: id | sport | league | player | team | opponent | stat | market | line | tier | game_time
-        </div>
-        <pre>{body}</pre>
-      </body>
-    </html>
-    """
-    return HTMLResponse(content=html)
+    return "\n".join(lines)
 
 
-
-# -------------------------------------------------------------------
-# Upload page
-# -------------------------------------------------------------------
+# ------------------ Upload page ------------------------
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page():
@@ -1082,7 +1027,6 @@ def upload_page():
               }
             }
 
-            // Clear textarea + status whenever sport changes
             document.addEventListener("DOMContentLoaded", () => {
               const sportSelect = document.getElementById('sport');
               const rawTextarea = document.getElementById('raw');
@@ -1101,16 +1045,11 @@ def upload_page():
     """
 
 
-# -------------------------------------------------------------------
-# Update props API
-# -------------------------------------------------------------------
-
 @app.post("/update-props")
 async def update_props(request: Request):
     """
-    Accept raw PrizePicks JSON from the client (your phone/browser),
-    normalize it for the selected sport, and save to props.json,
-    preserving other sports and updating a backup.
+    Accept raw PrizePicks JSON from the client, normalize it for the selected sport,
+    and save to props.json, preserving other sports and updating a backup.
     """
     payload = await request.json()
     sport_key = payload.get("sport")
@@ -1139,9 +1078,224 @@ async def update_props(request: Request):
     combined = remaining + new_props
     save_props(combined)
 
+    # Return counts using cleaned view (drops expired if any)
+    total_live = len(get_current_props())
     return {
         "status": "ok",
         "sport": sport_name,
         "count": len(new_props),
-        "total": len(combined),
+        "total": total_live,
     }
+
+
+# ------------------ Export page (multi-sport) ------------------------
+
+@app.get("/export", response_class=HTMLResponse)
+def export_page():
+    """
+    Export UI: multi-select sports, generate compact text export for ChatGPT.
+    """
+    # Build options from SPORTS config
+    options_html = []
+    for key, cfg in SPORTS.items():
+        name = cfg["name"]
+        options_html.append(f'<option value="{key}">{name} ({key})</option>')
+    options = "\n".join(options_html)
+
+    return f"""
+    <html>
+      <head>
+        <title>Export Props for ChatGPT</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          :root {{ color-scheme: dark; }}
+          body {{
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+          }}
+          main {{
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 1.5rem 1.25rem 2rem;
+          }}
+          h1 {{
+            font-size: 1.3rem;
+            margin-bottom: 0.5rem;
+          }}
+          p {{
+            font-size: 0.9rem;
+            color: #9ca3af;
+            margin-top: 0;
+            margin-bottom: 0.7rem;
+          }}
+          label {{
+            display: block;
+            margin-bottom: 0.25rem;
+            font-size: 0.85rem;
+            color: #9ca3af;
+          }}
+          select {{
+            width: 100%;
+            min-height: 7rem;
+            border-radius: 0.75rem;
+            border: 1px solid rgba(148,163,184,0.7);
+            background-color: rgba(15,23,42,0.95);
+            color: #e5e7eb;
+            font-size: 0.9rem;
+            outline: none;
+            padding: 0.4rem 0.6rem;
+          }}
+          option {{
+            padding: 0.2rem 0.3rem;
+          }}
+          button {{
+            margin-top: 0.7rem;
+            padding: 0.55rem 1.1rem;
+            border-radius: 9999px;
+            border: none;
+            background: linear-gradient(to right, #22c55e, #16a34a);
+            color: white;
+            font-size: 0.9rem;
+            cursor: pointer;
+            box-shadow: 0 12px 25px rgba(16,185,129,0.4);
+          }}
+          button:hover {{ filter: brightness(1.07); }}
+          #status {{
+            margin-top: 0.6rem;
+            font-size: 0.8rem;
+            color: #9ca3af;
+            white-space: pre-wrap;
+          }}
+          textarea {{
+            width: 100%;
+            height: 60vh;
+            margin-top: 1rem;
+            border-radius: 0.75rem;
+            border: 1px solid rgba(148,163,184,0.7);
+            background-color: #030712;
+            color: #e5e7eb;
+            padding: 0.75rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.8rem;
+          }}
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Export Props for ChatGPT</h1>
+          <p>
+            Pick one or more sports, then hit <strong>Generate Export</strong>.
+            This will build a compact text export of all <strong>live</strong> props
+            (expired props are removed based on <code>game_time</code>).
+            Format per line:
+            <code>sport,player,team,opponent,stat,line,tier,game_time</code>.
+          </p>
+          <label for="sports">Sports (Ctrl/Cmd + click to multi-select)</label>
+          <select id="sports" multiple>
+            {options}
+          </select>
+          <button type="button" onclick="generateExport()">Generate Export</button>
+          <div id="status"></div>
+          <textarea id="exportBox" readonly placeholder="Your export will appear here…"></textarea>
+
+          <script>
+            async function generateExport() {
+              const status = document.getElementById("status");
+              const box = document.getElementById("exportBox");
+              const select = document.getElementById("sports");
+
+              const selected = Array.from(select.options)
+                .filter(o => o.selected)
+                .map(o => o.value);
+
+              if (!selected.length) {
+                status.textContent = "❌ Please select at least one sport.";
+                box.value = "";
+                return;
+              }
+
+              status.textContent = "Building export…";
+              box.value = "";
+
+              try {{
+                const res = await fetch("/export-data", {{
+                  method: "POST",
+                  headers: {{ "Content-Type": "application/json" }},
+                  body: JSON.stringify({{ sports: selected }})
+                }});
+                const data = await res.json();
+                if (!res.ok) {{
+                  status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
+                  return;
+                }}
+                box.value = data.text || "";
+                status.textContent = "✅ Export ready (" + (data.count ?? 0) + " props). Long-press / Ctrl+A to copy.";
+              }} catch (e) {{
+                status.textContent = "❌ Network error: " + e;
+              }}
+            }
+          </script>
+        </main>
+      </body>
+    </html>
+    """
+
+
+@app.post("/export-data")
+async def export_data(request: Request):
+    """
+    Backend for /export. Accepts { "sports": ["nfl", "nba", ...] } and returns
+    a compact text export of all live props for those sports:
+
+    sport,player,team,opponent,stat,line,tier,game_time
+    """
+    payload = await request.json()
+    sports = payload.get("sports")
+    if not isinstance(sports, list) or not sports:
+        raise HTTPException(status_code=400, detail="Field 'sports' must be a non-empty list.")
+
+    # Normalize keys
+    requested_keys = {str(s).lower() for s in sports}
+    valid_keys = {k for k in SPORTS.keys() if k in requested_keys}
+    if not valid_keys:
+        raise HTTPException(status_code=400, detail="No valid sports keys provided.")
+
+    # Map to sport display names
+    selected_sport_names = {SPORTS[k]["name"] for k in valid_keys}
+    selected_sport_names_lower = {name.lower() for name in selected_sport_names}
+
+    all_props = get_current_props()
+
+    def clean(v: Any) -> str:
+        return str(v).replace(",", " ").replace("\n", " ").strip()
+
+    filtered: List[Dict[str, Any]] = []
+    for p in all_props:
+        sname = (p.get("sport") or "").lower()
+        if sname in selected_sport_names_lower:
+            filtered.append(p)
+
+    lines: List[str] = []
+    header = "sport,player,team,opponent,stat,line,tier,game_time"
+    lines.append(header)
+
+    for p in filtered:
+        line = ",".join(
+            [
+                clean(p.get("sport", "")),
+                clean(p.get("player", "")),
+                clean(p.get("team", "")),
+                clean(p.get("opponent", "")),
+                clean(p.get("stat", "")),
+                str(p.get("line", "")),
+                clean(p.get("tier", "")),
+                clean(p.get("game_time", "")),
+            ]
+        )
+        lines.append(line)
+
+    text = "\n".join(lines)
+    return {"text": text, "count": len(filtered)}
