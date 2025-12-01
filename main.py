@@ -24,7 +24,7 @@ SPORTS: Dict[str, Dict[str, Any]] = {
     "nfl": {"name": "NFL", "league_id": "9"},
     "nba": {"name": "NBA", "league_id": "7"},
     "nhl": {"name": "NHL", "league_id": "8"},
-    "cbb": {"name": "CBB", "league_id": "20"},   # CBB league id
+    "cbb": {"name": "CBB", "league_id": "20"},
     "cfb": {"name": "CFB", "league_id": "15"},
     "soccer": {"name": "Soccer", "league_id": "82"},
     "tennis": {"name": "Tennis", "league_id": "5"},
@@ -68,7 +68,7 @@ def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
     return []
 
 
-def _parse_game_time(value: Any) -> Optional[datetime]]:
+def _parse_game_time(value: Any) -> Optional[datetime]:
     """
     Best-effort parse of the game_time string into an aware datetime in UTC.
     Returns None if parsing fails or value is empty.
@@ -339,29 +339,27 @@ def board_view():
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
           :root { color-scheme: dark; }
-          * { box-sizing: border-box; }
           body {
             margin: 0;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: radial-gradient(circle at top, #1f2933, #020617);
+            background: #020617;
             color: #e5e7eb;
           }
           header {
-            padding: 1.25rem 1.5rem;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.3);
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid #1f2937;
             display: flex;
             flex-wrap: wrap;
             justify-content: space-between;
             align-items: center;
-            gap: 0.75rem;
-            backdrop-filter: blur(10px);
-            background: linear-gradient(to right, rgba(15,23,42,.95), rgba(15,23,42,.88));
+            gap: 0.5rem;
+            background: #020617;
             position: sticky;
             top: 0;
             z-index: 10;
           }
           header h1 {
-            font-size: 1.15rem;
+            font-size: 1.1rem;
             margin: 0;
           }
           header h1 span {
@@ -376,153 +374,93 @@ def board_view():
           }
           header nav a:hover { color: #e5e7eb; }
           main {
-            padding: 1.25rem 1.5rem 2rem;
-            max-width: 1200px;
+            padding: 1rem 1.25rem 1.5rem;
+            max-width: 1100px;
             margin: 0 auto;
-          }
-          .summary {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 1rem;
-            margin-bottom: 1.25rem;
-          }
-          .summary-card {
-            flex: 1 1 220px;
-            padding: 0.9rem 1rem;
-            border-radius: 0.75rem;
-            background: linear-gradient(135deg, rgba(15,23,42,0.95), rgba(30,64,175,0.6));
-            border: 1px solid rgba(148, 163, 184, 0.35);
-            box-shadow: 0 18px 40px rgba(15,23,42,0.6);
-          }
-          .summary-card h2 {
-            margin: 0 0 0.25rem;
-            font-size: 0.95rem;
-            color: #9ca3af;
-            font-weight: 500;
-          }
-          .summary-card p {
-            margin: 0;
-            font-size: 1.1rem;
-            font-weight: 600;
-          }
-          .summary-card span {
-            font-size: 0.8rem;
-            color: #9ca3af;
           }
           .controls {
             display: flex;
             flex-wrap: wrap;
-            gap: 0.75rem;
-            margin-bottom: 1rem;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
             align-items: center;
           }
           .controls input, .controls select {
-            padding: 0.55rem 0.7rem;
+            padding: 0.45rem 0.65rem;
             border-radius: 9999px;
-            border: 1px solid rgba(148, 163, 184, 0.6);
-            background-color: rgba(15,23,42,0.95);
+            border: 1px solid #4b5563;
+            background-color: #020617;
             color: #e5e7eb;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             outline: none;
           }
           .controls input::placeholder { color: #6b7280; }
           .controls button {
-            padding: 0.55rem 0.9rem;
+            padding: 0.45rem 0.9rem;
             border-radius: 9999px;
             border: none;
             font-size: 0.85rem;
             cursor: pointer;
-            background: linear-gradient(to right, #22c55e, #16a34a);
+            background: #22c55e;
             color: white;
-            box-shadow: 0 10px 25px rgba(34,197,94,0.35);
           }
-          .controls button:hover { filter: brightness(1.08); }
           .controls small {
             font-size: 0.75rem;
             color: #9ca3af;
           }
           .table-wrapper {
-            border-radius: 0.9rem;
-            border: 1px solid rgba(148, 163, 184, 0.4);
+            border-radius: 0.75rem;
+            border: 1px solid #1f2937;
             overflow: hidden;
-            background: rgba(15,23,42,0.96);
-            box-shadow: 0 22px 45px rgba(15,23,42,0.7);
+            background: #020617;
           }
           table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 0.82rem;
+            font-size: 0.8rem;
           }
           thead {
-            background: linear-gradient(to right, rgba(30,64,175,0.9), rgba(55,65,81,0.95));
+            background: #111827;
           }
           thead th {
             text-align: left;
-            padding: 0.6rem 0.75rem;
+            padding: 0.5rem 0.6rem;
             white-space: nowrap;
             font-weight: 500;
             color: #e5e7eb;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.5);
+            border-bottom: 1px solid #1f2937;
           }
-          tbody tr:nth-child(even) { background-color: rgba(15,23,42,0.96); }
-          tbody tr:nth-child(odd) { background-color: rgba(17,24,39,0.96); }
+          tbody tr:nth-child(even) { background-color: #020617; }
+          tbody tr:nth-child(odd) { background-color: #020617; }
           tbody td {
-            padding: 0.5rem 0.75rem;
-            border-bottom: 1px solid rgba(55, 65, 81, 0.8);
+            padding: 0.45rem 0.6rem;
+            border-bottom: 1px solid #111827;
           }
-          tbody tr:hover { background-color: rgba(30,64,175,0.3); }
+          tbody tr:hover { background-color: #111827; }
           .pill {
             display: inline-flex;
             align-items: center;
             padding: 0.15rem 0.5rem;
             border-radius: 9999px;
             font-size: 0.7rem;
-            border: 1px solid rgba(148,163,184,0.7);
-            color: #e5e7eb;
-          }
-          .pill.stat {
-            border-color: rgba(56,189,248,0.8);
-            color: #67e8f9;
-          }
-          .pill.league {
-            border-color: rgba(74,222,128,0.8);
-            color: #bbf7d0;
-          }
-          .pill.time {
-            border-color: rgba(251,191,36,0.85);
-            color: #fed7aa;
-          }
-          .pill.tier-standard {
-            border-color: rgba(148,163,184,0.9);
+            border: 1px solid #4b5563;
             color: #e5e7eb;
           }
           .pill.tier-goblin {
-            border-color: rgba(251,191,36,0.9);
-            color: #fed7aa;
+            border-color: #fbbf24;
+            color: #fbbf24;
           }
           .pill.tier-demon {
-            border-color: rgba(248,113,113,0.9);
+            border-color: #f97373;
             color: #fecaca;
           }
-          .footer {
-            margin-top: 0.75rem;
-            font-size: 0.75rem;
-            color: #6b7280;
-            display: flex;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 0.5rem;
+          .pill.time {
+            border-color: #facc15;
+            color: #facc15;
           }
-          .footer a {
-            color: #9ca3af;
-            text-decoration: none;
-          }
-          .footer a:hover { color: #e5e7eb; }
-          @media (max-width: 768px) {
-            header { padding: 0.9rem 1rem; }
-            main { padding: 1rem; }
-            thead { font-size: 0.78rem; }
-            tbody td { padding: 0.45rem 0.5rem; }
+          .pill.league {
+            border-color: #22c55e;
+            color: #bbf7d0;
           }
         </style>
       </head>
@@ -531,30 +469,12 @@ def board_view():
           <h1><span>Props Board</span> · Multi-Sport Proxy</h1>
           <nav>
             <a href="/">Board</a>
-            <a href="/upload">Upload JSON</a>
+            <a href="/upload">Upload</a>
             <a href="/export">Export</a>
-            <a href="/model-board">Model List</a>
+            <a href="/model-board">Model CSV</a>
           </nav>
         </header>
         <main>
-          <div class="summary">
-            <div class="summary-card">
-              <h2>Total Props</h2>
-              <p id="summary-count">–</p>
-              <span>Currently shown on this board</span>
-            </div>
-            <div class="summary-card">
-              <h2>Unique Players</h2>
-              <p id="summary-players">–</p>
-              <span>Across all stats & sports</span>
-            </div>
-            <div class="summary-card">
-              <h2>Sports</h2>
-              <p id="summary-sports">–</p>
-              <span>Distinct sports in this view</span>
-            </div>
-          </div>
-
           <div class="controls">
             <input id="search" type="text" placeholder="Search player, team, opponent…" />
             <select id="stat-filter">
@@ -586,11 +506,6 @@ def board_view():
               </tbody>
             </table>
           </div>
-
-          <div class="footer">
-            <span id="footer-count"></span>
-            <span>Upload new boards at <a href="/upload">/upload</a>. Export for ChatGPT at <a href="/export">/export</a>.</span>
-          </div>
         </main>
 
         <script>
@@ -614,22 +529,6 @@ def board_view():
           function getTierRaw(p) {
             if (!p.tier) return "";
             return String(p.tier).toLowerCase();
-          }
-
-          function renderSummary(props) {
-            const countEl = document.getElementById("summary-count");
-            const playersEl = document.getElementById("summary-players");
-            const sportsEl = document.getElementById("summary-sports");
-            const footerCount = document.getElementById("footer-count");
-
-            const total = props.length;
-            const players = new Set(props.map(p => p.player || "").filter(Boolean));
-            const sports = new Set(props.map(p => sportName(p)).filter(Boolean));
-
-            countEl.textContent = total.toString();
-            playersEl.textContent = players.size.toString();
-            sportsEl.textContent = sports.size ? Array.from(sports).join(", ") : "–";
-            footerCount.textContent = total ? `Showing ${total} props` : "No props loaded.";
           }
 
           function renderStatFilter(props) {
@@ -704,10 +603,7 @@ def board_view():
               tr.appendChild(tdOpp);
 
               const tdStat = document.createElement("td");
-              const pillStat = document.createElement("span");
-              pillStat.className = "pill stat";
-              pillStat.textContent = p.stat || "";
-              tdStat.appendChild(pillStat);
+              tdStat.textContent = p.stat || "";
               tr.appendChild(tdStat);
 
               const tdLine = document.createElement("td");
@@ -718,17 +614,14 @@ def board_view():
               const tierRaw = getTierRaw(p);
               if (tierRaw) {
                 const pillTier = document.createElement("span");
-                let cls = "pill tier-standard";
+                let cls = "pill";
                 let label = tierRaw;
                 if (tierRaw === "goblin") {
-                  cls = "pill tier-goblin";
+                  cls += " tier-goblin";
                   label = "Goblin";
                 } else if (tierRaw === "demon") {
-                  cls = "pill tier-demon";
+                  cls += " tier-demon";
                   label = "Demon";
-                } else if (tierRaw === "standard") {
-                  cls = "pill tier-standard";
-                  label = "Standard";
                 }
                 pillTier.className = cls;
                 pillTier.textContent = label;
@@ -780,7 +673,6 @@ def board_view():
               filtered = filtered.filter(p => sportName(p) === sportVal);
             }
 
-            renderSummary(filtered);
             renderTable(filtered);
           }
 
@@ -900,7 +792,6 @@ def _build_model_page_text(
 
     all_props = get_current_props()
 
-    # Filter by sport if not 'all'
     if sport_key == "all":
         filtered = all_props
     else:
@@ -910,7 +801,6 @@ def _build_model_page_text(
             if (p.get("sport") or "").lower() == sport_name.lower()
         ]
 
-    # Filter by tier(s) if provided
     if tier_set is not None:
         filtered = [
             p
@@ -918,7 +808,6 @@ def _build_model_page_text(
             if str(p.get("tier", "")).lower() in tier_set
         ]
 
-    # Stable sort: sport (for 'all'), then game_time, then player
     filtered.sort(
         key=lambda p: (
             (p.get("sport") or ""),
@@ -974,14 +863,6 @@ def model_board_paged(
     page_size: int = 150,
     tiers: str = "",
 ):
-    """
-    Paged CSV-style model board.
-
-    Examples:
-      /model-board/nba/page/1         -> all tiers, 150 props per page
-      /model-board/nba/page/1?tiers=standard+goblin
-      /model-board/all/page/1
-    """
     text = _build_model_page_text(
         sport_key=sport,
         tiers_str=tiers or None,
@@ -998,17 +879,6 @@ def model_board_paged_tiers(
     page: int,
     page_size: int = 150,
 ):
-    """
-    Paged CSV-style model board with tiers in the path.
-
-    Examples:
-      /model-board/nba/standard/page/1
-      /model-board/nba/goblin/page/1
-      /model-board/nba/demon/page/1
-      /model-board/nba/standard+goblin/page/1
-      /model-board/nba/goblin+demon/page/1
-      /model-board/nba/standard+demon/page/1
-    """
     text = _build_model_page_text(
         sport_key=sport,
         tiers_str=tiers,
@@ -1033,7 +903,7 @@ def upload_page():
           body {
             margin: 0;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: radial-gradient(circle at top, #020617, #020617);
+            background: #020617;
             color: #e5e7eb;
           }
           main {
@@ -1062,8 +932,8 @@ def upload_page():
             margin-bottom: 0.8rem;
             padding: 0.55rem 0.7rem;
             border-radius: 0.75rem;
-            border: 1px solid rgba(148,163,184,0.7);
-            background-color: rgba(15,23,42,0.95);
+            border: 1px solid #4b5563;
+            background-color: #020617;
             color: #e5e7eb;
             font-size: 0.9rem;
             outline: none;
@@ -1072,8 +942,8 @@ def upload_page():
             width: 100%;
             height: 320px;
             border-radius: 0.75rem;
-            border: 1px solid rgba(148,163,184,0.7);
-            background-color: rgba(15,23,42,0.95);
+            border: 1px solid #4b5563;
+            background-color: #020617;
             color: #e5e7eb;
             padding: 0.75rem;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -1086,11 +956,10 @@ def upload_page():
             padding: 0.55rem 1.1rem;
             border-radius: 9999px;
             border: none;
-            background: linear-gradient(to right, #38bdf8, #2563eb);
+            background: #38bdf8;
             color: white;
             font-size: 0.9rem;
             cursor: pointer;
-            box-shadow: 0 15px 30px rgba(37,99,235,0.45);
           }
           button:hover { filter: brightness(1.07); }
           #status {
@@ -1099,11 +968,6 @@ def upload_page():
             white-space: pre-wrap;
             color: #9ca3af;
           }
-          a {
-            color: #93c5fd;
-            text-decoration: none;
-          }
-          a:hover { color: #bfdbfe; }
         </style>
       </head>
       <body>
@@ -1133,55 +997,55 @@ def upload_page():
           <div id="status"></div>
 
           <script>
-            async function upload() {
+            async function upload() {{
               const status = document.getElementById('status');
               const txt = document.getElementById('raw').value;
               const sport = document.getElementById('sport').value;
 
-              if (!sport) {
+              if (!sport) {{
                 status.textContent = "❌ Please select a sport.";
                 return;
-              }
+              }}
 
               let raw;
-              try {
+              try {{
                 raw = JSON.parse(txt);
-              } catch (e) {
+              }} catch (e) {{
                 status.textContent = "❌ Invalid JSON: " + e;
                 return;
-              }
+              }}
 
               status.textContent = "Uploading and processing…";
-              try {
-                const res = await fetch("/update-props", {
+              try {{
+                const res = await fetch("/update-props", {{
                   method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ sport, raw })
-                });
+                  headers: {{ "Content-Type": "application/json" }},
+                  body: JSON.stringify({{ sport, raw }})
+                }});
                 const data = await res.json();
-                if (!res.ok) {
+                if (!res.ok) {{
                   status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
                   return;
-                }
+                }}
                 status.textContent =
                   "✅ Uploaded " + (data.count ?? 0) + " " + (data.sport || "") +
                   " props. Total on board: " + (data.total ?? "?") + ".";
-              } catch (e) {
+              }} catch (e) {{
                 status.textContent = "❌ Network error: " + e;
-              }
-            }
+              }}
+            }}
 
-            document.addEventListener("DOMContentLoaded", () => {
+            document.addEventListener("DOMContentLoaded", () => {{
               const sportSelect = document.getElementById('sport');
               const rawTextarea = document.getElementById('raw');
               const statusDiv = document.getElementById('status');
-              if (sportSelect && rawTextarea) {
-                sportSelect.addEventListener('change', () => {
+              if (sportSelect && rawTextarea) {{
+                sportSelect.addEventListener('change', () => {{
                   rawTextarea.value = '';
                   if (statusDiv) statusDiv.textContent = '';
-                });
-              }
-            });
+                }});
+              }}
+            }});
           </script>
         </main>
       </body>
@@ -1190,10 +1054,6 @@ def upload_page():
 
 @app.post("/update-props")
 async def update_props(request: Request):
-    """
-    Accept raw PrizePicks JSON from the client, normalize it for the selected sport,
-    and save to props.json, preserving other sports and updating a backup.
-    """
     payload = await request.json()
     sport_key = payload.get("sport")
     raw = payload.get("raw")
@@ -1215,9 +1075,7 @@ async def update_props(request: Request):
     existing = load_file_props_raw_or_empty()
     sport_name = SPORTS[sport_key]["name"]
 
-    # Remove old props for this sport
     remaining = [p for p in existing if (p.get("sport") or "").lower() != sport_name.lower()]
-
     combined = remaining + new_props
     save_props(combined)
 
@@ -1230,14 +1088,11 @@ async def update_props(request: Request):
     }
 
 # -------------------------------------------------------------------
-# Export page (multi-sport, mobile-friendly)
+# Export page (multi-sport)
 # -------------------------------------------------------------------
 
 @app.get("/export", response_class=HTMLResponse)
 def export_page():
-    """
-    Export UI: pill-style multi-select sports, tier filters, and max size.
-    """
     sport_labels = []
     for key, cfg in SPORTS.items():
         name = cfg["name"]
@@ -1246,104 +1101,103 @@ def export_page():
         )
     sports_html = "\n".join(sport_labels)
 
-    return f"""
+    return """
     <html>
       <head>
         <title>Export Props for ChatGPT</title>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
-          :root {{ color-scheme: dark; }}
-          body {{
+          :root { color-scheme: dark; }
+          body {
             margin: 0;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background: #020617;
             color: #e5e7eb;
-          }}
-          main {{
+          }
+          main {
             max-width: 900px;
             margin: 0 auto;
             padding: 1.5rem 1.25rem 2rem;
-          }}
-          h1 {{
+          }
+          h1 {
             font-size: 1.3rem;
             margin-bottom: 0.5rem;
-          }}
-          p {{
+          }
+          p {
             font-size: 0.9rem;
             color: #9ca3af;
             margin-top: 0;
             margin-bottom: 0.7rem;
-          }}
-          label {{
+          }
+          label {
             display: block;
             margin-bottom: 0.25rem;
             font-size: 0.85rem;
             color: #9ca3af;
-          }}
-          .row {{
+          }
+          .row {
             margin-bottom: 0.9rem;
-          }}
-          .pill-group {{
+          }
+          .pill-group {
             display: flex;
             flex-wrap: wrap;
             gap: 0.6rem;
             font-size: 0.85rem;
             color: #e5e7eb;
-          }}
-          .pill-group label {{
+          }
+          .pill-group label {
             display: inline-flex;
             align-items: center;
             gap: 0.35rem;
             padding: 0.3rem 0.7rem;
             border-radius: 9999px;
-            border: 1px solid rgba(148,163,184,0.7);
-            background-color: rgba(15,23,42,0.95);
+            border: 1px solid #4b5563;
+            background-color: #020617;
             margin: 0;
-          }}
-          .pill-group input[type="checkbox"] {{
+          }
+          .pill-group input[type="checkbox"] {
             accent-color: #22c55e;
-          }}
-          input[type="number"] {{
+          }
+          input[type="number"] {
             width: 120px;
             padding: 0.4rem 0.6rem;
             border-radius: 0.75rem;
-            border: 1px solid rgba(148,163,184,0.7);
-            background-color: rgba(15,23,42,0.95);
+            border: 1px solid #4b5563;
+            background-color: #020617;
             color: #e5e7eb;
             font-size: 0.9rem;
             outline: none;
-          }}
-          button {{
+          }
+          button {
             margin-top: 0.7rem;
             padding: 0.55rem 1.1rem;
             border-radius: 9999px;
             border: none;
-            background: linear-gradient(to right, #22c55e, #16a34a);
+            background: #22c55e;
             color: white;
             font-size: 0.9rem;
             cursor: pointer;
-            box-shadow: 0 12px 25px rgba(16,185,129,0.4);
-          }}
-          button:hover {{ filter: brightness(1.07); }}
-          #status {{
+          }
+          button:hover { filter: brightness(1.07); }
+          #status {
             margin-top: 0.6rem;
             font-size: 0.8rem;
             color: #9ca3af;
             white-space: pre-wrap;
-          }}
-          textarea {{
+          }
+          textarea {
             width: 100%;
             height: 60vh;
             margin-top: 1rem;
             border-radius: 0.75rem;
-            border: 1px solid rgba(148,163,184,0.7);
-            background-color: #030712;
+            border: 1px solid #4b5563;
+            background-color: #020617;
             color: #e5e7eb;
             padding: 0.75rem;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
             font-size: 0.8rem;
-          }}
+          }
         </style>
       </head>
       <body>
@@ -1359,7 +1213,7 @@ def export_page():
           <div class="row">
             <label>Sports</label>
             <div class="pill-group" id="sports-group">
-              {sports_html}
+    """ + sports_html + """
             </div>
           </div>
 
@@ -1382,7 +1236,7 @@ def export_page():
           <textarea id="exportBox" readonly placeholder="Your export will appear here…"></textarea>
 
           <script>
-            async function generateExport() {{
+            async function generateExport() {
               const status = document.getElementById("status");
               const box = document.getElementById("exportBox");
 
@@ -1392,11 +1246,11 @@ def export_page():
                 .filter(cb => cb.checked)
                 .map(cb => cb.value);
 
-              if (!selectedSports.length) {{
+              if (!selectedSports.length) {
                 status.textContent = "❌ Please select at least one sport.";
                 box.value = "";
                 return;
-              }}
+              }
 
               const tiers = [];
               if (document.getElementById("tier-goblin").checked) tiers.push("goblin");
@@ -1409,27 +1263,27 @@ def export_page():
               status.textContent = "Building export…";
               box.value = "";
 
-              try {{
-                const res = await fetch("/export-data", {{
+              try {
+                const res = await fetch("/export-data", {
                   method: "POST",
-                  headers: {{ "Content-Type": "application/json" }},
-                  body: JSON.stringify({{
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
                     sports: selectedSports,
                     tiers: tiers,
                     max: maxVal
-                  }})
-                }});
+                  })
+                });
                 const data = await res.json();
-                if (!res.ok) {{
+                if (!res.ok) {
                   status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
                   return;
-                }}
+                }
                 box.value = data.text || "";
                 status.textContent = "✅ Export ready (" + (data.count ?? 0) + " props). Long-press / Ctrl+A to copy.";
-              }} catch (e) {{
+              } catch (e) {
                 status.textContent = "❌ Network error: " + e;
-              }}
-            }}
+              }
+            }
           </script>
         </main>
       </body>
@@ -1438,17 +1292,6 @@ def export_page():
 
 @app.post("/export-data")
 async def export_data(request: Request):
-    """
-    Backend for /export. Accepts:
-      {
-        "sports": ["nfl", "nba", ...],
-        "tiers": ["goblin", "standard", "demon"],
-        "max": 300
-      }
-
-    Returns compact text:
-      sport,player,team,opponent,stat,line,tier,game_time
-    """
     payload = await request.json()
     sports = payload.get("sports")
     tiers = payload.get("tiers") or []
@@ -1527,33 +1370,9 @@ async def export_data(request: Request):
 
 @app.get("/model-board-json")
 def model_board_json(
-    sports: str = "all",   # e.g. "nba" or "nba,nfl" or "all"
-    tiers: str = "",       # e.g. "standard+goblin" or "goblin"
+    sports: str = "all",
+    tiers: str = "",
 ):
-    """
-    JSON version of the model board, designed for the model to read.
-
-    Query params:
-      sports: comma-separated sport keys (nfl,nba,nhl,...) OR "all"
-      tiers:  e.g. "standard", "goblin", "demon", "standard+goblin"
-
-    Returns:
-      [
-        {
-          "sport": "...",
-          "player": "...",
-          "team": "...",
-          "opponent": "...",
-          "stat": "...",
-          "market": "...",
-          "line": 0.0,
-          "tier": "...",
-          "game_time": "..."
-        },
-        ...
-      ]
-    """
-    # --- Parse sports ---
     if sports.lower() == "all":
         selected_keys = set(SPORTS.keys())
     else:
@@ -1565,7 +1384,6 @@ def model_board_json(
     selected_sport_names = {SPORTS[k]["name"] for k in selected_keys}
     selected_sport_names_lower = {name.lower() for name in selected_sport_names}
 
-    # --- Parse tiers ---
     tier_set = set()
     if tiers:
         for t in tiers.split("+"):
@@ -1581,7 +1399,6 @@ def model_board_json(
     if not tier_set:
         tier_set = ALLOWED_TIERS.copy()
 
-    # --- Load and filter props ---
     all_props = get_current_props()
     filtered: List[Dict[str, Any]] = []
 
@@ -1589,14 +1406,11 @@ def model_board_json(
         sname = (p.get("sport") or "").lower()
         if sname not in selected_sport_names_lower:
             continue
-
         tier_raw = str(p.get("tier", "")).lower()
         if tier_raw not in tier_set:
             continue
-
         filtered.append(p)
 
-    # Sort for consistency
     filtered.sort(
         key=lambda p: (
             (p.get("sport") or ""),
@@ -1605,7 +1419,6 @@ def model_board_json(
         )
     )
 
-    # --- Return simplified objects for the model ---
     result: List[Dict[str, Any]] = []
     for p in filtered:
         result.append(
