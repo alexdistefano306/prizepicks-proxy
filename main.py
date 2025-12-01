@@ -66,7 +66,6 @@ SPORTS: Dict[str, Dict[str, Any]] = {
     "cs2": {"name": "CS2", "league_id": "265"},
 }
 
-
 # -------------------------------------------------------------------
 # Helpers: load / save props
 # -------------------------------------------------------------------
@@ -131,11 +130,43 @@ def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
 # Normalization of PrizePicks JSON
 # -------------------------------------------------------------------
 
+def _extract_tier_from_attrs(attrs: Dict[str, Any]) -> str:
+    """
+    Map attributes['odds_Type'] (or variations) into "goblin" / "standard" / "demon".
+
+    Expected values: e.g. "Goblin", "Standard", "Demon" (or lowercase).
+    If we can't recognize it, default to "standard".
+    """
+    raw = (
+        attrs.get("odds_Type")
+        or attrs.get("odds_type")
+        or attrs.get("oddsType")
+        or attrs.get("tier")
+    )
+    if not raw:
+        return "standard"
+
+    t = str(raw).strip().lower()
+
+    if "goblin" in t:
+        return "goblin"
+    if "demon" in t:
+        return "demon"
+    if "standard" in t or "normal" in t:
+        return "standard"
+
+    # Unknown label -> treat as standard so UI doesn't break
+    return "standard"
+
+
 def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, Any]]:
     """
     Turn a raw PrizePicks JSON blob into a simple list of props.
     Also enforces that the JSON's league_id matches the selected sport
     (when we know the league_id).
+
+    We expect prizepicks JSON with:
+      { "data": [...], "included": [...] }
     """
     if sport_key not in SPORTS:
         raise ValueError(f"Unknown sport key: {sport_key}")
@@ -273,8 +304,8 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
 
             start_time = game_info.get("start_time")
 
-            # Tier (goblin/standard/demon) – if your JSON has it, use it; else standard
-            tier = attrs.get("tier") or "standard"
+            # Tier from odds_Type
+            tier = _extract_tier_from_attrs(attrs)
 
             # Skip incomplete rows
             if not player or line is None or not stat:
