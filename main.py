@@ -477,7 +477,7 @@ def board_view():
             <a href="/">Board</a>
             <a href="/upload">Upload</a>
             <a href="/export">Export</a>
-            <a href="/model-index">Model Index</a>
+            <a href="/model-index-main">Model Index</a>
           </nav>
         </header>
         <main>
@@ -842,7 +842,7 @@ def model_board():
 def model_board_paged(
     sport: str,
     page: int,
-    page_size: int = 150,
+    page_size: int = 80,  # smaller pages → less truncation
     tiers: str = "",
 ):
     """
@@ -860,42 +860,207 @@ def model_board_paged(
         page_size=page_size,
     )
     return PlainTextResponse(text)
-
 # -------------------------------------------------------------------
-# Model index page (HTML with links to CSV pages)
+# Main model index hub (small HTML → links to filtered /model-index)
 # -------------------------------------------------------------------
 
 
-@app.get("/model-index", response_class=HTMLResponse)
-def model_index():
+@app.get("/model-index-main", response_class=HTMLResponse)
+def model_index_main():
     """
-    HTML index of all /model-board pages for each sport and tier.
+    Small top-level hub that lists which sports/tiers currently have props,
+    and links to the filtered /model-index?sport=...&tier=... pages.
 
-    The model can:
-      1) open /model-index (because you give it that URL),
-      2) then click the links for the pages it needs (NBA standard, etc.).
+    Use this as the URL you paste into ChatGPT, e.g.:
+
+      https://your-app.onrender.com/model-index-main
     """
     props = get_current_props()
 
-    # Map sport name -> sport_key
+    # Map "NBA" -> "nba", etc.
     sport_name_to_key: Dict[str, str] = {}
     for key, cfg in SPORTS.items():
         sport_name_to_key[cfg["name"].lower()] = key
 
-    # Count props per (sport_key, tier)
-    counts: Dict[tuple, int] = {}
+    # Count total per sport and per (sport, tier)
+    total_per_sport: Dict[str, int] = {}
+    counts_by_tier: Dict[tuple, int] = {}
+
     for p in props:
         sname = (p.get("sport") or "").lower()
         skey = sport_name_to_key.get(sname)
         if not skey:
             continue
+
+        total_per_sport[skey] = total_per_sport.get(skey, 0) + 1
+
         tier = str(p.get("tier", "standard")).lower()
         if tier not in ALLOWED_TIERS:
             tier = "standard"
-        k = (skey, tier)
+        key = (skey, tier)
+        counts_by_tier[key] = counts_by_tier.get(key, 0) + 1
+
+    html = """
+    <html>
+      <head>
+        <title>Model Board Hub</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          :root { color-scheme: dark; }
+          body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+          }
+          main {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 1.5rem 1.25rem 2rem;
+          }
+          h1 {
+            font-size: 1.3rem;
+            margin-bottom: 0.75rem;
+          }
+          h2 {
+            margin-top: 1.2rem;
+            margin-bottom: 0.4rem;
+            font-size: 1.05rem;
+          }
+          p {
+            font-size: 0.9rem;
+            color: #9ca3af;
+          }
+          ul {
+            list-style: none;
+            padding-left: 0;
+            margin-top: 0.3rem;
+            margin-bottom: 0.8rem;
+          }
+          li {
+            margin-bottom: 0.25rem;
+          }
+          a {
+            color: #38bdf8;
+            text-decoration: none;
+            font-size: 0.85rem;
+          }
+          a:hover {
+            text-decoration: underline;
+          }
+          .pill {
+            display: inline-block;
+            margin-left: 0.4rem;
+            padding: 0.1rem 0.5rem;
+            border-radius: 9999px;
+            border: 1px solid #4b5563;
+            font-size: 0.7rem;
+            color: #9ca3af;
+          }
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Model Board Hub</h1>
+          <p>
+            This page lists the available sport/tier categories. Each link goes to a
+            <code>/model-index?sport=...&amp;tier=...</code> page, which in turn lists
+            the paged CSV endpoints like <code>/model-board/nba/page/1?tiers=standard</code>.
+          </p>
+    """
+
+    # For each sport that actually has live props, show:
+    # - "All tiers" link (e.g. /model-index?sport=nba)
+    # - per-tier links if they have props (standard / goblin / demon)
+    for skey, cfg in SPORTS.items():
+        total = total_per_sport.get(skey, 0)
+        if total == 0:
+            continue
+
+        sname = cfg["name"]
+        html += f"<h2>{sname} <span class='pill'>{total} props</span></h2>\n"
+        html += "<ul>\n"
+
+        # All tiers for this sport
+        all_url = f"/model-index?sport={skey}"
+        html += f"<li><a href='{all_url}'>{sname} · all tiers</a></li>\n"
+
+        # Tier-specific links (only if there are props)
+        for tier in ["standard", "goblin", "demon"]:
+            count = counts_by_tier.get((skey, tier), 0)
+            if count == 0:
+                continue
+            tier_url = f"/model-index?sport={skey}&tier={tier}"
+            label = tier.capitalize()
+            html += f"<li><a href='{tier_url}'>{sname} · {label} only</a></li>\n"
+
+        html += "</ul>\n"
+
+    html += """
+        </main>
+      </body>
+    </html>
+    """
+    return HTMLResponse(html)
+
+# -------------------------------------------------------------------
+# Model index page (HTML with links to CSV pages)
+# -------------------------------------------------------------------
+
+@app.get("/model-index", response_class=HTMLResponse)
+def model_index(sport: str = "", tier: str = ""):
+    """
+    HTML index of /model-board pages.
+
+    Query params:
+      - sport: optional sport key ("nfl","nba","nhl","cbb","cfb","soccer","tennis","cs2").
+               If omitted → all sports.
+      - tier:  optional tier filter ("standard","goblin","demon").
+               If omitted → all tiers.
+
+    Typical usage (from /model-index-main):
+      /model-index?sport=nba
+      /model-index?sport=nba&tier=standard
+    """
+    props = get_current_props()
+
+    # Map sport display name -> sport_key, e.g. "nba" -> "nba"
+    sport_name_to_key: Dict[str, str] = {}
+    for key, cfg in SPORTS.items():
+        sport_name_to_key[cfg["name"].lower()] = key
+
+    # Figure out which sports we are including
+    if sport:
+        skey = sport.lower()
+        if skey not in SPORTS:
+            raise HTTPException(status_code=400, detail="Unknown sport key.")
+        sport_filter_keys: List[str] = [skey]
+    else:
+        sport_filter_keys = list(SPORTS.keys())
+
+    # Optional tier filter
+    tier_filter = tier.lower().strip() if tier else ""
+
+    # Count props per (sport_key, tier) subject to filters
+    counts: Dict[tuple, int] = {}
+    for p in props:
+        sname = (p.get("sport") or "").lower()
+        skey = sport_name_to_key.get(sname)
+        if not skey or skey not in sport_filter_keys:
+            continue
+
+        t = str(p.get("tier", "standard")).lower()
+        if t not in ALLOWED_TIERS:
+            t = "standard"
+
+        if tier_filter and t != tier_filter:
+            continue
+
+        k = (skey, t)
         counts[k] = counts.get(k, 0) + 1
 
-    PAGE_SIZE = 150
+    PAGE_SIZE = 150  # keep in sync with /model-board page_size default
 
     html = """
     <html>
@@ -965,13 +1130,16 @@ def model_index():
         <main>
           <h1>Model Board Index</h1>
           <p>
-            Each link below is a CSV page from <code>/model-board/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code>.
-            When you want the model to search props, give it this index URL and let it follow the links it needs.
+            This page lists the <code>/model-board/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code> CSV URLs
+            for the selected sport/tier slice.
           </p>
     """
 
-    for skey, cfg in SPORTS.items():
+    # Only show sections for the sports we filtered to
+    for skey in sport_filter_keys:
+        cfg = SPORTS[skey]
         sname = cfg["name"]
+
         total_for_sport = sum(
             count for (sport_key, _tier), count in counts.items() if sport_key == skey
         )
@@ -980,17 +1148,20 @@ def model_index():
 
         html += f"<h2>{sname} <span class='pill'>{total_for_sport} props</span></h2>\n"
 
-        for tier in ["standard", "goblin", "demon"]:
-            count = counts.get((skey, tier), 0)
+        for t in ["standard", "goblin", "demon"]:
+            if tier_filter and t != tier_filter:
+                continue
+
+            count = counts.get((skey, t), 0)
             if count == 0:
                 continue
 
             pages = (count + PAGE_SIZE - 1) // PAGE_SIZE
-            html += f"<h3>{tier.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
+            html += f"<h3>{t.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
             html += "<ul>\n"
             for page in range(1, pages + 1):
-                url = f"/model-board/{skey}/page/{page}?tiers={tier}"
-                html += f"<li><a href='{url}'>{sname} · {tier} · page {page}</a></li>\n"
+                url = f"/model-board/{skey}/page/{page}?tiers={t}"
+                html += f"<li><a href='{url}'>{sname} · {t} · page {page}</a></li>\n"
             html += "</ul>\n"
 
     html += """
@@ -999,6 +1170,7 @@ def model_index():
     </html>
     """
     return HTMLResponse(html)
+
 
 # -------------------------------------------------------------------
 # Upload page
