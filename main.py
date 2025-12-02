@@ -37,9 +37,10 @@ ALLOWED_TIERS = {"standard", "goblin", "demon"}
 # Helpers: load / save props
 # -------------------------------------------------------------------
 
+
 def save_props(props: List[Dict[str, Any]]) -> None:
     """
-    Save props to props.json and keep a backup in props_backup.json.
+    Save props to props.json and keep a backup copy.
     """
     text = json.dumps(props, indent=2, ensure_ascii=False)
     DATA_FILE.write_text(text, encoding="utf-8")
@@ -48,7 +49,7 @@ def save_props(props: List[Dict[str, Any]]) -> None:
 
 def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
     """
-    Load props from disk without adding any dummy props.
+    Load props from disk without adding dummy values.
     Prefer main file, then backup. Return [] if nothing valid.
     """
     if DATA_FILE.exists():
@@ -77,11 +78,9 @@ def _parse_game_time(value: Any) -> Optional[datetime]:
         return None
     try:
         s = str(value).strip()
-        # Handle trailing 'Z'
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
-        # If naive, assume UTC
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
@@ -92,9 +91,8 @@ def _parse_game_time(value: Any) -> Optional[datetime]:
 def get_current_props() -> List[Dict[str, Any]]:
     """
     Load props and drop any whose game_time is already in the past.
-    Writes the cleaned list back to props.json / props_backup.json.
-
-    IMPORTANT: No dummy fallback. If nothing is stored, returns [].
+    Writes the cleaned list back to disk when it changes.
+    No dummy fallback: returns [] if nothing is stored.
     """
     raw = load_file_props_raw_or_empty()
     if not raw:
@@ -106,8 +104,8 @@ def get_current_props() -> List[Dict[str, Any]]:
 
     for p in raw:
         gt = _parse_game_time(p.get("game_time"))
-        # If no game time or unparsable, keep it (safer than deleting)
         if gt is None:
+            # If no time or can't parse, keep it rather than silently delete.
             filtered.append(p)
             continue
         if gt >= now:
@@ -123,6 +121,7 @@ def get_current_props() -> List[Dict[str, Any]]:
 # -------------------------------------------------------------------
 # Normalization of PrizePicks JSON
 # -------------------------------------------------------------------
+
 
 def _extract_tier_from_attrs(attrs: Dict[str, Any]) -> str:
     """
@@ -156,6 +155,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     """
     if sport_key not in SPORTS:
         raise ValueError(f"Unknown sport key: {sport_key}")
+
     sport_cfg = SPORTS[sport_key]
     sport_name = sport_cfg["name"]
     expected_league_id = sport_cfg["league_id"]
@@ -163,16 +163,14 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     data = raw.get("data", []) or []
     included = raw.get("included", []) or []
 
-    # --- Validate league_id where we know it ---
+    # Validate league_id when possible
     league_ids = set()
     for proj in data:
         attrs = proj.get("attributes", {}) or {}
-        # From relationships
         rel_league = (proj.get("relationships", {}).get("league") or {}).get("data") or {}
         lid_rel = rel_league.get("id")
         if lid_rel is not None:
             league_ids.add(str(lid_rel))
-        # Attributes-level league_id
         lid_attr = attrs.get("league_id")
         if lid_attr is not None:
             league_ids.add(str(lid_attr))
@@ -183,7 +181,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
             f"but JSON contained league ids {sorted(league_ids)}"
         )
 
-    # --- Build helper maps from included ---
+    # Build helper maps from "included"
     players: Dict[str, Dict[str, Any]] = {}
     games: Dict[str, Dict[str, Any]] = {}
     teams: Dict[str, Dict[str, Any]] = {}
@@ -216,10 +214,10 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
             games[iid] = {
                 "home_team_id": home_rel.get("id"),
                 "away_team_id": away_rel.get("id"),
-                "start_time": attrs.get("start_time") or attrs.get("start_at"),
+                "start_time": attrs.get("start_time")
+                or attrs.get("start_at"),
             }
 
-    # --- Build simple props list ---
     props: List[Dict[str, Any]] = []
 
     for proj in data:
@@ -275,9 +273,13 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
             )
             line = attrs.get("line_score")
             if line is not None:
-                line = float(line)
+                try:
+                    line = float(line)
+                except Exception:
+                    line = None
 
-            start_time = game_info.get("start_time")
+            start_time = game_info.get("start_time") or attrs.get("start_time") or attrs.get("start_at")
+
             tier = _extract_tier_from_attrs(attrs)
 
             if not player or line is None or not stat:
@@ -302,7 +304,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 }
             )
         except Exception:
-            # Skip any malformed entry
+            # Skip malformed entries rather than killing the whole upload
             continue
 
     return props
@@ -311,12 +313,15 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
 # Small util for CSV cleanup
 # -------------------------------------------------------------------
 
+
 def _clean_csv_val(v: Any) -> str:
+    """Make sure CSV values don't break the row."""
     return str(v).replace(",", " ").replace("\n", " ").strip()
 
 # -------------------------------------------------------------------
 # Health
 # -------------------------------------------------------------------
+
 
 @app.get("/health")
 def health():
@@ -325,6 +330,7 @@ def health():
 # -------------------------------------------------------------------
 # Main odds board UI
 # -------------------------------------------------------------------
+
 
 @app.get("/", response_class=HTMLResponse)
 def board_view():
@@ -471,7 +477,7 @@ def board_view():
             <a href="/">Board</a>
             <a href="/upload">Upload</a>
             <a href="/export">Export</a>
-            <a href="/model-board">Model CSV</a>
+            <a href="/model-index">Model Index</a>
           </nav>
         </header>
         <main>
@@ -707,6 +713,11 @@ def board_view():
     </html>
     """
 
+# -------------------------------------------------------------------
+# Raw props JSON (for UI & scripts)
+# -------------------------------------------------------------------
+
+
 @app.get("/props.json")
 def props_json():
     """
@@ -716,48 +727,8 @@ def props_json():
     return JSONResponse(props)
 
 # -------------------------------------------------------------------
-# Model board (CSV full + paged with tiers)
+# Model-board CSV helpers
 # -------------------------------------------------------------------
-
-@app.get("/model-board", response_class=PlainTextResponse)
-def model_board():
-    """
-    CSV-style model board of all live props (all sports).
-
-    Format (header + rows):
-      sport,player,team,opponent,stat,line,tier,game_time
-    """
-    props = get_current_props()
-
-    props_sorted = sorted(
-        props,
-        key=lambda p: (
-            (p.get("sport") or ""),
-            (p.get("game_time") or ""),
-            (p.get("player") or ""),
-        ),
-    )
-
-    lines: List[str] = []
-    header = "sport,player,team,opponent,stat,line,tier,game_time"
-    lines.append(header)
-
-    for p in props_sorted:
-        line = ",".join(
-            [
-                _clean_csv_val(p.get("sport", "")),
-                _clean_csv_val(p.get("player", "")),
-                _clean_csv_val(p.get("team", "")),
-                _clean_csv_val(p.get("opponent", "")),
-                _clean_csv_val(p.get("stat", "")),
-                str(p.get("line", "")),
-                _clean_csv_val(p.get("tier", "")),
-                _clean_csv_val(p.get("game_time", "")),
-            ]
-        )
-        lines.append(line)
-
-    return "\n".join(lines)
 
 
 def _build_model_page_text(
@@ -767,31 +738,34 @@ def _build_model_page_text(
     page_size: int,
 ) -> str:
     """
-    Shared logic for paged model-board endpoints.
-    Allows optional tier filtering via tiers_str (e.g. "standard", "standard+goblin").
+    Build a single CSV page for the model-board endpoints.
+
+    - sport_key: "all" or one of SPORTS keys (nfl, nba, nhl, cbb, cfb, etc.)
+    - tiers_str: "standard+goblin", "goblin", "demon", etc. or None for all tiers
+    - page: 1-based page index
+    - page_size: number of props per page (150 recommended)
     """
     sport_key = sport_key.lower()
 
     if sport_key != "all" and sport_key not in SPORTS:
         raise HTTPException(status_code=404, detail="Unknown sport key")
 
+    # Parse tiers
     tier_set: Optional[set] = None
     if tiers_str:
         parts = [t.strip().lower() for t in tiers_str.split("+") if t.strip()]
         tmp = set()
         for t in parts:
             if t not in ALLOWED_TIERS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
-                )
+                raise HTTPException(status_code=400, detail=f"Invalid tier '{t}'")
             tmp.add(t)
         if not tmp:
-            raise HTTPException(status_code=400, detail="No valid tiers provided.")
+            raise HTTPException(status_code=400, detail="No valid tiers")
         tier_set = tmp
 
     all_props = get_current_props()
 
+    # Filter by sport
     if sport_key == "all":
         filtered = all_props
     else:
@@ -801,13 +775,14 @@ def _build_model_page_text(
             if (p.get("sport") or "").lower() == sport_name.lower()
         ]
 
+    # Filter by tier if requested
     if tier_set is not None:
         filtered = [
-            p
-            for p in filtered
+            p for p in filtered
             if str(p.get("tier", "")).lower() in tier_set
         ]
 
+    # Sort for predictability
     filtered.sort(
         key=lambda p: (
             (p.get("sport") or ""),
@@ -825,10 +800,7 @@ def _build_model_page_text(
 
     total_pages = (total + page_size - 1) // page_size
     if page > total_pages:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Page {page} out of range (total_pages={total_pages})",
-        )
+        raise HTTPException(status_code=404, detail=f"Page {page} out of range (total_pages={total_pages})")
 
     start = (page - 1) * page_size
     end = start + page_size
@@ -856,6 +828,16 @@ def _build_model_page_text(
     return "\n".join(lines)
 
 
+@app.get("/model-board", response_class=PlainTextResponse)
+def model_board():
+    """
+    Full board as CSV in one page (debugging).
+    For the model, use /model-board/{sport}/page/{page}?tiers=...
+    """
+    text = _build_model_page_text("all", None, page=1, page_size=100000)
+    return PlainTextResponse(text)
+
+
 @app.get("/model-board/{sport}/page/{page}", response_class=PlainTextResponse)
 def model_board_paged(
     sport: str,
@@ -863,6 +845,14 @@ def model_board_paged(
     page_size: int = 150,
     tiers: str = "",
 ):
+    """
+    Paged CSV board for a single sport.
+
+    Examples:
+      /model-board/nba/page/1
+      /model-board/nba/page/1?tiers=standard
+      /model-board/nba/page/2?tiers=standard+goblin&page_size=150
+    """
     text = _build_model_page_text(
         sport_key=sport,
         tiers_str=tiers or None,
@@ -871,25 +861,149 @@ def model_board_paged(
     )
     return PlainTextResponse(text)
 
+# -------------------------------------------------------------------
+# Model index page (HTML with links to CSV pages)
+# -------------------------------------------------------------------
 
-@app.get("/model-board/{sport}/{tiers}/page/{page}", response_class=PlainTextResponse)
-def model_board_paged_tiers(
-    sport: str,
-    tiers: str,
-    page: int,
-    page_size: int = 150,
-):
-    text = _build_model_page_text(
-        sport_key=sport,
-        tiers_str=tiers,
-        page=page,
-        page_size=page_size,
-    )
-    return PlainTextResponse(text)
+
+@app.get("/model-index", response_class=HTMLResponse)
+def model_index():
+    """
+    HTML index of all /model-board pages for each sport and tier.
+
+    The model can:
+      1) open /model-index (because you give it that URL),
+      2) then click the links for the pages it needs (NBA standard, etc.).
+    """
+    props = get_current_props()
+
+    # Map sport name -> sport_key
+    sport_name_to_key: Dict[str, str] = {}
+    for key, cfg in SPORTS.items():
+        sport_name_to_key[cfg["name"].lower()] = key
+
+    # Count props per (sport_key, tier)
+    counts: Dict[tuple, int] = {}
+    for p in props:
+        sname = (p.get("sport") or "").lower()
+        skey = sport_name_to_key.get(sname)
+        if not skey:
+            continue
+        tier = str(p.get("tier", "standard")).lower()
+        if tier not in ALLOWED_TIERS:
+            tier = "standard"
+        k = (skey, tier)
+        counts[k] = counts.get(k, 0) + 1
+
+    PAGE_SIZE = 150
+
+    html = """
+    <html>
+      <head>
+        <title>Model Board Index</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          :root { color-scheme: dark; }
+          body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+          }
+          main {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 1.5rem 1.25rem 2rem;
+          }
+          h1 {
+            font-size: 1.3rem;
+            margin-bottom: 0.75rem;
+          }
+          h2 {
+            margin-top: 1.2rem;
+            margin-bottom: 0.4rem;
+            font-size: 1.05rem;
+          }
+          h3 {
+            margin-top: 0.6rem;
+            margin-bottom: 0.35rem;
+            font-size: 0.95rem;
+            color: #9ca3af;
+          }
+          p {
+            font-size: 0.9rem;
+            color: #9ca3af;
+          }
+          ul {
+            list-style: none;
+            padding-left: 0;
+          }
+          li {
+            margin-bottom: 0.25rem;
+          }
+          a {
+            color: #38bdf8;
+            text-decoration: none;
+            font-size: 0.85rem;
+          }
+          a:hover {
+            text-decoration: underline;
+          }
+          .pill {
+            display: inline-block;
+            margin-left: 0.4rem;
+            padding: 0.1rem 0.5rem;
+            border-radius: 9999px;
+            border: 1px solid #4b5563;
+            font-size: 0.7rem;
+            color: #9ca3af;
+          }
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Model Board Index</h1>
+          <p>
+            Each link below is a CSV page from <code>/model-board/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code>.
+            When you want the model to search props, give it this index URL and let it follow the links it needs.
+          </p>
+    """
+
+    for skey, cfg in SPORTS.items():
+        sname = cfg["name"]
+        total_for_sport = sum(
+            count for (sport_key, _tier), count in counts.items() if sport_key == skey
+        )
+        if total_for_sport == 0:
+            continue
+
+        html += f"<h2>{sname} <span class='pill'>{total_for_sport} props</span></h2>\n"
+
+        for tier in ["standard", "goblin", "demon"]:
+            count = counts.get((skey, tier), 0)
+            if count == 0:
+                continue
+
+            pages = (count + PAGE_SIZE - 1) // PAGE_SIZE
+            html += f"<h3>{tier.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
+            html += "<ul>\n"
+            for page in range(1, pages + 1):
+                url = f"/model-board/{skey}/page/{page}?tiers={tier}"
+                html += f"<li><a href='{url}'>{sname} · {tier} · page {page}</a></li>\n"
+            html += "</ul>\n"
+
+    html += """
+        </main>
+      </body>
+    </html>
+    """
+    return HTMLResponse(html)
 
 # -------------------------------------------------------------------
 # Upload page
 # -------------------------------------------------------------------
+
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page():
@@ -1052,6 +1166,11 @@ def upload_page():
     </html>
     """
 
+# -------------------------------------------------------------------
+# Upload API
+# -------------------------------------------------------------------
+
+
 @app.post("/update-props")
 async def update_props(request: Request):
     payload = await request.json()
@@ -1075,6 +1194,7 @@ async def update_props(request: Request):
     existing = load_file_props_raw_or_empty()
     sport_name = SPORTS[sport_key]["name"]
 
+    # Remove any old props for this sport, then append new ones
     remaining = [p for p in existing if (p.get("sport") or "").lower() != sport_name.lower()]
     combined = remaining + new_props
     save_props(combined)
@@ -1091,9 +1211,10 @@ async def update_props(request: Request):
 # Export page (multi-sport)
 # -------------------------------------------------------------------
 
+
 @app.get("/export", response_class=HTMLResponse)
 def export_page():
-    sport_labels = []
+    sport_labels: List[str] = []
     for key, cfg in SPORTS.items():
         name = cfg["name"]
         sport_labels.append(
@@ -1290,6 +1411,7 @@ def export_page():
     </html>
     """
 
+
 @app.post("/export-data")
 async def export_data(request: Request):
     payload = await request.json()
@@ -1365,14 +1487,19 @@ async def export_data(request: Request):
     return {"text": text, "count": len(filtered)}
 
 # -------------------------------------------------------------------
-# JSON model-board endpoint (prop bank for the model)
+# JSON model-board (for your own tools; model can't see JSON)
 # -------------------------------------------------------------------
+
 
 @app.get("/model-board-json")
 def model_board_json(
     sports: str = "all",
     tiers: str = "",
 ):
+    """
+    JSON version of the model board (for your own scripts).
+    Note: the ChatGPT browsing sandbox does NOT expose JSON bodies to me.
+    """
     if sports.lower() == "all":
         selected_keys = set(SPORTS.keys())
     else:
@@ -1435,134 +1562,4 @@ def model_board_json(
             }
         )
 
-    return result
-
-@app.get("/model-board-json/{sport}/page/{page}")
-def model_board_json_paged(
-    sport: str,
-    page: int,
-    page_size: int = 2000,
-    tiers: str = "",
-):
-    """
-    Paged JSON model board, filtered by sport + tiers, default 2000 props per page.
-
-    Example:
-      /model-board-json/nba/page/1
-      /model-board-json/nba/page/1?tiers=standard+goblin
-      /model-board-json/all/page/2?tiers=goblin+demon&page_size=1500
-    """
-    sport_key = sport.lower()
-
-    # --- Determine which sports to include ---
-    if sport_key == "all":
-        selected_keys = set(SPORTS.keys())
-    else:
-        if sport_key not in SPORTS:
-            raise HTTPException(status_code=404, detail="Unknown sport key.")
-        selected_keys = {sport_key}
-
-    selected_sport_names = {SPORTS[k]["name"] for k in selected_keys}
-    selected_sport_names_lower = {name.lower() for name in selected_sport_names}
-
-    # --- Parse tiers (e.g. "standard+goblin") ---
-    tier_set = set()
-    if tiers:
-        for t in tiers.split("+"):
-            t = t.strip().lower()
-            if not t:
-                continue
-            if t not in ALLOWED_TIERS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
-                )
-            tier_set.add(t)
-    if not tier_set:
-        tier_set = ALLOWED_TIERS.copy()
-
-    # --- Clamp page_size a bit just in case ---
-    try:
-        page_size = int(page_size)
-    except Exception:
-        page_size = 2000
-    if page_size <= 0:
-        page_size = 2000
-    if page_size > 5000:
-        page_size = 5000
-
-    if page < 1:
-        raise HTTPException(status_code=400, detail="Page must be >= 1.")
-
-    # --- Filter props (same logic as CSV model-board + /model-board-json) ---
-    all_props = get_current_props()
-    filtered_full = []
-
-    for p in all_props:
-        sname = (p.get("sport") or "").lower()
-        if sname not in selected_sport_names_lower:
-            continue
-        tier_raw = str(p.get("tier", "")).lower()
-        if tier_raw not in tier_set:
-            continue
-        filtered_full.append(p)
-
-    filtered_full.sort(
-        key=lambda p: (
-            (p.get("sport") or ""),
-            (p.get("game_time") or ""),
-            (p.get("player") or ""),
-        )
-    )
-
-    total = len(filtered_full)
-    if total == 0:
-        return {
-            "sport": "all" if sport_key == "all" else SPORTS[sport_key]["name"],
-            "tiers": sorted(list(tier_set)),
-            "page": page,
-            "page_size": page_size,
-            "total": 0,
-            "total_pages": 0,
-            "count": 0,
-            "props": [],
-        }
-
-    total_pages = (total + page_size - 1) // page_size
-    if page > total_pages:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Page {page} out of range (total_pages={total_pages})",
-        )
-
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_props_full = filtered_full[start:end]
-
-    # --- Trim to the fields the model actually needs ---
-    page_props = []
-    for p in page_props_full:
-        page_props.append(
-            {
-                "sport": p.get("sport"),
-                "player": p.get("player"),
-                "team": p.get("team"),
-                "opponent": p.get("opponent"),
-                "stat": p.get("stat"),
-                "market": p.get("market"),
-                "line": p.get("line"),
-                "tier": p.get("tier"),
-                "game_time": p.get("game_time"),
-            }
-        )
-
-    return {
-        "sport": "all" if sport_key == "all" else SPORTS[sport_key]["name"],
-        "tiers": sorted(list(tier_set)),
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "total_pages": total_pages,
-        "count": len(page_props),
-        "props": page_props,
-    }
+    return JSONResponse(result)
