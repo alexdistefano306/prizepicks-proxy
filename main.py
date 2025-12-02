@@ -314,6 +314,11 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
 # -------------------------------------------------------------------
 
 
+def _clean_csv_val(v: Any) -> str:
+    """Make sure CSV values don't break the row."""
+    return str(v).replace(",", " ").replace("\n", " ").strip()
+
+
 def _model_csv_val(v: Any) -> str:
     """
     Ultra-compact value for model-board CSV pages:
@@ -321,10 +326,9 @@ def _model_csv_val(v: Any) -> str:
     - collapse spaces into underscores so each row has no whitespace
     """
     s = str(v).replace(",", " ").replace("\n", " ").strip()
-    # Collapse any internal whitespace into a single underscore
-    # so "LeBron James" -> "LeBron_James", "Los Angeles Lakers" -> "Los_Angeles_Lakers"
     parts = s.split()
     return "_".join(parts)
+
 
 # -------------------------------------------------------------------
 # Health
@@ -816,24 +820,22 @@ def _build_model_page_text(
 
     lines: List[str] = []
     header = "sport,player,team,opponent,stat,line,tier,game_time"
-lines.append(header)
+    lines.append(header)
 
-for p in page_props:
-    line = ",".join(
-        [
-            _model_csv_val(p.get("sport", "")),
-            _model_csv_val(p.get("player", "")),
-            _model_csv_val(p.get("team", "")),
-            _model_csv_val(p.get("opponent", "")),
-            _model_csv_val(p.get("stat", "")),
-            str(p.get("line", "")),
-            _model_csv_val(p.get("tier", "")),
-            _model_csv_val(p.get("game_time", "")),
-        ]
-    )
-    lines.append(line)
-
-
+    for p in page_props:
+        line = ",".join(
+            [
+                _model_csv_val(p.get("sport", "")),
+                _model_csv_val(p.get("player", "")),
+                _model_csv_val(p.get("team", "")),
+                _model_csv_val(p.get("opponent", "")),
+                _model_csv_val(p.get("stat", "")),
+                str(p.get("line", "")),
+                _model_csv_val(p.get("tier", "")),
+                _model_csv_val(p.get("game_time", "")),
+            ]
+        )
+        lines.append(line)
 
     return "\n".join(lines)
 
@@ -852,7 +854,7 @@ def model_board():
 def model_board_paged(
     sport: str,
     page: int,
-    page_size: int = 80,  # smaller pages → less truncation
+    page_size: int = 150,
     tiers: str = "",
 ):
     """
@@ -870,6 +872,7 @@ def model_board_paged(
         page_size=page_size,
     )
     return PlainTextResponse(text)
+
 # -------------------------------------------------------------------
 # Main model index hub (small HTML → links to filtered /model-index)
 # -------------------------------------------------------------------
@@ -982,7 +985,7 @@ def model_index_main():
 
     # For each sport that actually has live props, show:
     # - "All tiers" link (e.g. /model-index?sport=nba)
-    # - per-tier links if they have props (standard / goblin / demon)
+    # - per-tier links if there are props (standard / goblin / demon)
     for skey, cfg in SPORTS.items():
         total = total_per_sport.get(skey, 0)
         if total == 0:
@@ -1017,6 +1020,7 @@ def model_index_main():
 # -------------------------------------------------------------------
 # Model index page (HTML with links to CSV pages)
 # -------------------------------------------------------------------
+
 
 @app.get("/model-index", response_class=HTMLResponse)
 def model_index(sport: str = "", tier: str = ""):
@@ -1180,7 +1184,6 @@ def model_index(sport: str = "", tier: str = ""):
     </html>
     """
     return HTMLResponse(html)
-
 
 # -------------------------------------------------------------------
 # Upload page
