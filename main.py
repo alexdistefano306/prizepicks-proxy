@@ -1155,7 +1155,7 @@ def model_index_main():
 @app.get("/model-index", response_class=HTMLResponse)
 def model_index(sport: str = "", tier: str = ""):
     """
-    HTML index of /model-board pages.
+    HTML index of /model-board-view pages.
 
     Query params:
       - sport: optional sport key ("nfl","nba","nhl","cbb","cfb","soccer","tennis","cs2").
@@ -1163,7 +1163,7 @@ def model_index(sport: str = "", tier: str = ""):
       - tier:  optional tier filter ("standard","goblin","demon").
                If omitted → all tiers.
 
-    Typical usage (from /model-index-main):
+    Typical usage (via /model-index-main):
       /model-index?sport=nba
       /model-index?sport=nba&tier=standard
     """
@@ -1204,7 +1204,8 @@ def model_index(sport: str = "", tier: str = ""):
         k = (skey, t)
         counts[k] = counts.get(k, 0) + 1
 
-    PAGE_SIZE = 160  # keep in sync with /model-board and /model-board-view page_size default
+    # IMPORTANT: keep this in sync with your HTML page size
+    PAGE_SIZE = 80  # or 150 if you didn't change the page_size default
 
     html = """
     <html>
@@ -1275,7 +1276,8 @@ def model_index(sport: str = "", tier: str = ""):
           <h1>Model Board Index</h1>
           <p>
             This page lists the <code>/model-board-view/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code>
-            HTML URLs (and matching CSV URLs) for the selected sport/tier slice.
+            HTML endpoints for the selected sport/tier slice. Each link opens a small HTML table
+            of props that the model can read reliably.
           </p>
     """
 
@@ -1304,14 +1306,9 @@ def model_index(sport: str = "", tier: str = ""):
             html += f"<h3>{t.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
             html += "<ul>\n"
             for page in range(1, pages + 1):
-                view_url = f"/model-board-view/{skey}/page/{page}?tiers={t}"
-                csv_url = f"/model-board/{skey}/page/{page}?tiers={t}"
-                html += (
-                    f"<li>"
-                    f"<a href='{view_url}'>{sname} · {t} · page {page}</a> "
-                    f"<span class='pill'><a href='{csv_url}'>CSV</a></span>"
-                    f"</li>\n"
-                )
+                # 🔹 HTML-only: no CSV link here
+                url = f"/model-board-view/{skey}/page/{page}?tiers={t}"
+                html += f"<li><a href='{url}'>{sname} · {t} · page {page}</a></li>\n"
             html += "</ul>\n"
 
     html += """
@@ -1320,6 +1317,7 @@ def model_index(sport: str = "", tier: str = ""):
     </html>
     """
     return HTMLResponse(html)
+
 
 # -------------------------------------------------------------------
 # Upload page
