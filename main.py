@@ -310,12 +310,12 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     return props
 
 # -------------------------------------------------------------------
-# Small util for CSV cleanup
+# Small utils for CSV / HTML cleanup
 # -------------------------------------------------------------------
 
 
 def _clean_csv_val(v: Any) -> str:
-    """Make sure CSV values don't break the row."""
+    """Pretty CSV value (allow spaces, used for manual exports)."""
     return str(v).replace(",", " ").replace("\n", " ").strip()
 
 
@@ -323,12 +323,43 @@ def _model_csv_val(v: Any) -> str:
     """
     Ultra-compact value for model-board CSV pages:
     - remove commas/newlines
-    - collapse spaces into underscores so each row has no whitespace
+    - collapse spaces into underscores so each field has no internal whitespace
     """
     s = str(v).replace(",", " ").replace("\n", " ").strip()
     parts = s.split()
     return "_".join(parts)
 
+
+def _encode_prop_as_word_from_csv_row(row: Dict[str, str]) -> str:
+    """
+    Turn a CSV row dict into a single no-space string for HTML view pages.
+
+    Example:
+      sport=NBA, player=LeBron James, team=LAL, ...
+    becomes:
+      NBA|LeBron_James|LAL|PHX|PTS|26.5|standard|2025-12-02T00:00:00Z
+    """
+    def clean(s: Any) -> str:
+        # base string
+        val = str(s or "")
+        # avoid breaking our pipe format
+        val = val.replace("|", "/").replace("\n", " ").strip()
+        # collapse all whitespace to underscores so there are NO spaces
+        parts = val.split()
+        return "_".join(parts)
+
+    return "|".join(
+        [
+            clean(row.get("sport", "")),
+            clean(row.get("player", "")),
+            clean(row.get("team", "")),
+            clean(row.get("opponent", "")),
+            clean(row.get("stat", "")),
+            clean(row.get("line", "")),
+            clean(row.get("tier", "")),
+            clean(row.get("game_time", "")),
+        ]
+    )
 
 # -------------------------------------------------------------------
 # Health
@@ -755,7 +786,7 @@ def _build_model_page_text(
     - sport_key: "all" or one of SPORTS keys (nfl, nba, nhl, cbb, cfb, etc.)
     - tiers_str: "standard+goblin", "goblin", "demon", etc. or None for all tiers
     - page: 1-based page index
-    - page_size: number of props per page (150 recommended)
+    - page_size: number of props per page
     """
     sport_key = sport_key.lower()
 
@@ -839,12 +870,114 @@ def _build_model_page_text(
 
     return "\n".join(lines)
 
+# -------------------------------------------------------------------
+# HTML view for model-board pages (1 word per prop)
+# -------------------------------------------------------------------
+
+
+@app.get("/model-board-view/{sport}/page/{page}", response_class=HTMLResponse)
+def model_board_view(
+    sport: str,
+    page: int,
+    page_size: int = 160,  # ~160 props/page to stay under ~200 "word" snippet
+    tiers: str = "",
+):
+    """
+    HTML view of a model-board page, where each prop is a single 'word' line:
+    sport|player|team|opponent|stat|line|tier|game_time
+
+    This is the endpoint ChatGPT should actually open when searching props.
+    """
+    # Reuse the CSV builder (same filters & sorting)
+    csv_text = _build_model_page_text(
+        sport_key=sport,
+        tiers_str=tiers or None,
+        page=page,
+        page_size=page_size,
+    )
+
+    # Parse CSV into rows
+    lines = [ln for ln in csv_text.splitlines() if ln.strip()]
+    if not lines:
+        rows: List[Dict[str, str]] = []
+    else:
+        header = [h.strip() for h in lines[0].split(",")]
+        rows = []
+        for line in lines[1:]:
+            cols = line.split(",")
+            row: Dict[str, str] = {}
+            for idx, h in enumerate(header):
+                if idx < len(cols):
+                    row[h] = cols[idx]
+                else:
+                    row[h] = ""
+            rows.append(row)
+
+    html = """
+    <html>
+      <head>
+        <title>Model Board View</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          :root { color-scheme: dark; }
+          body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+          }
+          main {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 1.0rem 1.0rem 1.5rem;
+          }
+          h1 {
+            font-size: 1.0rem;
+            margin-bottom: 0.5rem;
+          }
+          p {
+            font-size: 0.8rem;
+            color: #9ca3af;
+            margin-top: 0;
+            margin-bottom: 0.5rem;
+          }
+          pre {
+            font-size: 0.75rem;
+            line-height: 1.25;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+          }
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Model Board View</h1>
+          <p>Each line below is one prop token: sport|player|team|opponent|stat|line|tier|game_time</p>
+          <pre>
+    """
+
+    for row in rows:
+        encoded = _encode_prop_as_word_from_csv_row(row)
+        html += encoded + "\n"
+
+    html += """</pre>
+        </main>
+      </body>
+    </html>
+    """
+    return HTMLResponse(html)
+
+# -------------------------------------------------------------------
+# Raw CSV model board endpoints
+# -------------------------------------------------------------------
+
 
 @app.get("/model-board", response_class=PlainTextResponse)
 def model_board():
     """
     Full board as CSV in one page (debugging).
-    For the model, use /model-board/{sport}/page/{page}?tiers=...
+    For the model, use /model-index-main → /model-index → /model-board-view/... .
     """
     text = _build_model_page_text("all", None, page=1, page_size=100000)
     return PlainTextResponse(text)
@@ -854,7 +987,7 @@ def model_board():
 def model_board_paged(
     sport: str,
     page: int,
-    page_size: int = 150,
+    page_size: int = 160,
     tiers: str = "",
 ):
     """
@@ -863,7 +996,7 @@ def model_board_paged(
     Examples:
       /model-board/nba/page/1
       /model-board/nba/page/1?tiers=standard
-      /model-board/nba/page/2?tiers=standard+goblin&page_size=150
+      /model-board/nba/page/2?tiers=standard+goblin&page_size=160
     """
     text = _build_model_page_text(
         sport_key=sport,
@@ -874,7 +1007,7 @@ def model_board_paged(
     return PlainTextResponse(text)
 
 # -------------------------------------------------------------------
-# Main model index hub (small HTML → links to filtered /model-index)
+# Model index pages (hub + filtered index)
 # -------------------------------------------------------------------
 
 
@@ -979,13 +1112,14 @@ def model_index_main():
           <p>
             This page lists the available sport/tier categories. Each link goes to a
             <code>/model-index?sport=...&amp;tier=...</code> page, which in turn lists
-            the paged CSV endpoints like <code>/model-board/nba/page/1?tiers=standard</code>.
+            the paged CSV/HTML endpoints like
+            <code>/model-board-view/nba/page/1?tiers=standard</code>.
           </p>
     """
 
     # For each sport that actually has live props, show:
     # - "All tiers" link (e.g. /model-index?sport=nba)
-    # - per-tier links if there are props (standard / goblin / demon)
+    # - per-tier links if they have props (standard / goblin / demon)
     for skey, cfg in SPORTS.items():
         total = total_per_sport.get(skey, 0)
         if total == 0:
@@ -1017,10 +1151,6 @@ def model_index_main():
     """
     return HTMLResponse(html)
 
-# -------------------------------------------------------------------
-# Model index page (HTML with links to CSV pages)
-# -------------------------------------------------------------------
-
 
 @app.get("/model-index", response_class=HTMLResponse)
 def model_index(sport: str = "", tier: str = ""):
@@ -1039,7 +1169,7 @@ def model_index(sport: str = "", tier: str = ""):
     """
     props = get_current_props()
 
-    # Map sport display name -> sport_key, e.g. "nba" -> "nba"
+    # Map sport display name -> sport_key, e.g. "NBA" -> "nba"
     sport_name_to_key: Dict[str, str] = {}
     for key, cfg in SPORTS.items():
         sport_name_to_key[cfg["name"].lower()] = key
@@ -1074,7 +1204,7 @@ def model_index(sport: str = "", tier: str = ""):
         k = (skey, t)
         counts[k] = counts.get(k, 0) + 1
 
-    PAGE_SIZE = 150  # keep in sync with /model-board page_size default
+    PAGE_SIZE = 160  # keep in sync with /model-board and /model-board-view page_size default
 
     html = """
     <html>
@@ -1144,8 +1274,8 @@ def model_index(sport: str = "", tier: str = ""):
         <main>
           <h1>Model Board Index</h1>
           <p>
-            This page lists the <code>/model-board/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code> CSV URLs
-            for the selected sport/tier slice.
+            This page lists the <code>/model-board-view/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code>
+            HTML URLs (and matching CSV URLs) for the selected sport/tier slice.
           </p>
     """
 
@@ -1174,8 +1304,14 @@ def model_index(sport: str = "", tier: str = ""):
             html += f"<h3>{t.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
             html += "<ul>\n"
             for page in range(1, pages + 1):
-                url = f"/model-board/{skey}/page/{page}?tiers={t}"
-                html += f"<li><a href='{url}'>{sname} · {t} · page {page}</a></li>\n"
+                view_url = f"/model-board-view/{skey}/page/{page}?tiers={t}"
+                csv_url = f"/model-board/{skey}/page/{page}?tiers={t}"
+                html += (
+                    f"<li>"
+                    f"<a href='{view_url}'>{sname} · {t} · page {page}</a> "
+                    f"<span class='pill'><a href='{csv_url}'>CSV</a></span>"
+                    f"</li>\n"
+                )
             html += "</ul>\n"
 
     html += """
@@ -1672,7 +1808,7 @@ async def export_data(request: Request):
     return {"text": text, "count": len(filtered)}
 
 # -------------------------------------------------------------------
-# JSON model-board (for your own tools; model can't see JSON)
+# JSON model-board (for your own tools; model can't see JSON bodies)
 # -------------------------------------------------------------------
 
 
