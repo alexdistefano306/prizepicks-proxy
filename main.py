@@ -1436,3 +1436,133 @@ def model_board_json(
         )
 
     return result
+
+@app.get("/model-board-json/{sport}/page/{page}")
+def model_board_json_paged(
+    sport: str,
+    page: int,
+    page_size: int = 2000,
+    tiers: str = "",
+):
+    """
+    Paged JSON model board, filtered by sport + tiers, default 2000 props per page.
+
+    Example:
+      /model-board-json/nba/page/1
+      /model-board-json/nba/page/1?tiers=standard+goblin
+      /model-board-json/all/page/2?tiers=goblin+demon&page_size=1500
+    """
+    sport_key = sport.lower()
+
+    # --- Determine which sports to include ---
+    if sport_key == "all":
+        selected_keys = set(SPORTS.keys())
+    else:
+        if sport_key not in SPORTS:
+            raise HTTPException(status_code=404, detail="Unknown sport key.")
+        selected_keys = {sport_key}
+
+    selected_sport_names = {SPORTS[k]["name"] for k in selected_keys}
+    selected_sport_names_lower = {name.lower() for name in selected_sport_names}
+
+    # --- Parse tiers (e.g. "standard+goblin") ---
+    tier_set = set()
+    if tiers:
+        for t in tiers.split("+"):
+            t = t.strip().lower()
+            if not t:
+                continue
+            if t not in ALLOWED_TIERS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
+                )
+            tier_set.add(t)
+    if not tier_set:
+        tier_set = ALLOWED_TIERS.copy()
+
+    # --- Clamp page_size a bit just in case ---
+    try:
+        page_size = int(page_size)
+    except Exception:
+        page_size = 2000
+    if page_size <= 0:
+        page_size = 2000
+    if page_size > 5000:
+        page_size = 5000
+
+    if page < 1:
+        raise HTTPException(status_code=400, detail="Page must be >= 1.")
+
+    # --- Filter props (same logic as CSV model-board + /model-board-json) ---
+    all_props = get_current_props()
+    filtered_full = []
+
+    for p in all_props:
+        sname = (p.get("sport") or "").lower()
+        if sname not in selected_sport_names_lower:
+            continue
+        tier_raw = str(p.get("tier", "")).lower()
+        if tier_raw not in tier_set:
+            continue
+        filtered_full.append(p)
+
+    filtered_full.sort(
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    total = len(filtered_full)
+    if total == 0:
+        return {
+            "sport": "all" if sport_key == "all" else SPORTS[sport_key]["name"],
+            "tiers": sorted(list(tier_set)),
+            "page": page,
+            "page_size": page_size,
+            "total": 0,
+            "total_pages": 0,
+            "count": 0,
+            "props": [],
+        }
+
+    total_pages = (total + page_size - 1) // page_size
+    if page > total_pages:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Page {page} out of range (total_pages={total_pages})",
+        )
+
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_props_full = filtered_full[start:end]
+
+    # --- Trim to the fields the model actually needs ---
+    page_props = []
+    for p in page_props_full:
+        page_props.append(
+            {
+                "sport": p.get("sport"),
+                "player": p.get("player"),
+                "team": p.get("team"),
+                "opponent": p.get("opponent"),
+                "stat": p.get("stat"),
+                "market": p.get("market"),
+                "line": p.get("line"),
+                "tier": p.get("tier"),
+                "game_time": p.get("game_time"),
+            }
+        )
+
+    return {
+        "sport": "all" if sport_key == "all" else SPORTS[sport_key]["name"],
+        "tiers": sorted(list(tier_set)),
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "count": len(page_props),
+        "props": page_props,
+    }
