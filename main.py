@@ -314,9 +314,17 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
 # -------------------------------------------------------------------
 
 
-def _clean_csv_val(v: Any) -> str:
-    """Make sure CSV values don't break the row."""
-    return str(v).replace(",", " ").replace("\n", " ").strip()
+def _model_csv_val(v: Any) -> str:
+    """
+    Ultra-compact value for model-board CSV pages:
+    - remove commas/newlines
+    - collapse spaces into underscores so each row has no whitespace
+    """
+    s = str(v).replace(",", " ").replace("\n", " ").strip()
+    # Collapse any internal whitespace into a single underscore
+    # so "LeBron James" -> "LeBron_James", "Los Angeles Lakers" -> "Los_Angeles_Lakers"
+    parts = s.split()
+    return "_".join(parts)
 
 # -------------------------------------------------------------------
 # Health
@@ -808,22 +816,24 @@ def _build_model_page_text(
 
     lines: List[str] = []
     header = "sport,player,team,opponent,stat,line,tier,game_time"
-    lines.append(header)
+lines.append(header)
 
-    for p in page_props:
-        line = ",".join(
-            [
-                _clean_csv_val(p.get("sport", "")),
-                _clean_csv_val(p.get("player", "")),
-                _clean_csv_val(p.get("team", "")),
-                _clean_csv_val(p.get("opponent", "")),
-                _clean_csv_val(p.get("stat", "")),
-                str(p.get("line", "")),
-                _clean_csv_val(p.get("tier", "")),
-                _clean_csv_val(p.get("game_time", "")),
-            ]
-        )
-        lines.append(line)
+for p in page_props:
+    line = ",".join(
+        [
+            _model_csv_val(p.get("sport", "")),
+            _model_csv_val(p.get("player", "")),
+            _model_csv_val(p.get("team", "")),
+            _model_csv_val(p.get("opponent", "")),
+            _model_csv_val(p.get("stat", "")),
+            str(p.get("line", "")),
+            _model_csv_val(p.get("tier", "")),
+            _model_csv_val(p.get("game_time", "")),
+        ]
+    )
+    lines.append(line)
+
+
 
     return "\n".join(lines)
 
