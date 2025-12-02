@@ -1,797 +1,901 @@
-import os
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+from datetime import datetime, timezone
 import json
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
-    HTMLResponse,
-    PlainTextResponse,
-    JSONResponse,
-    RedirectResponse,
-)
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-app = FastAPI(title="PrizePicks Prop Board")
+app = FastAPI(title="PrizePicks Props Proxy – Multi-Sport Board")
 
-# CORS so you can hit this from browser / mobile, etc.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# -------------------------------------------------------------------
+# Files / paths
+# -------------------------------------------------------------------
 
-# -----------------------------
+BASE_DIR = Path(__file__).parent
+DATA_FILE = BASE_DIR / "props.json"
+BACKUP_FILE = BASE_DIR / "props_backup.json"
+
+# -------------------------------------------------------------------
 # Config / constants
-# -----------------------------
-
-DATA_FILE = "stored_props.json"
+# -------------------------------------------------------------------
 
 SPORTS: Dict[str, Dict[str, Any]] = {
-    "nfl": {"name": "NFL", "league_id": 9},
-    "nba": {"name": "NBA", "league_id": 7},
-    "nhl": {"name": "NHL", "league_id": 8},
-    "cbb": {"name": "CBB", "league_id": 20},
-    "cfb": {"name": "CFB", "league_id": 15},
-    "soccer": {"name": "Soccer", "league_id": 82},
-    "tennis": {"name": "Tennis", "league_id": 5},
-    "cs2": {"name": "CS2", "league_id": 265},
+    "nfl": {"name": "NFL", "league_id": "9"},
+    "nba": {"name": "NBA", "league_id": "7"},
+    "nhl": {"name": "NHL", "league_id": "8"},
+    "cbb": {"name": "CBB", "league_id": "20"},
+    "cfb": {"name": "CFB", "league_id": "15"},
+    "soccer": {"name": "Soccer", "league_id": "82"},
+    "tennis": {"name": "Tennis", "league_id": "5"},
+    "cs2": {"name": "CS2", "league_id": "265"},
 }
 
-ALLOWED_TIERS = ["standard", "goblin", "demon"]
+ALLOWED_TIERS = {"standard", "goblin", "demon"}
 
-CSV_COLUMNS = [
-    "sport",
-    "tier",
-    "player",
-    "team",
-    "opponent",
-    "stat",
-    "line",
-    "game_time",
-    "league_id",
-    "sport_key",
-]
-
-CURRENT_PROPS: List[Dict[str, Any]] = []
+# -------------------------------------------------------------------
+# Helpers: load / save props
+# -------------------------------------------------------------------
 
 
-# -----------------------------
-# Utility helpers
-# -----------------------------
+def save_props(props: List[Dict[str, Any]]) -> None:
+    """
+    Save props to props.json and keep a backup copy.
+    """
+    text = json.dumps(props, indent=2, ensure_ascii=False)
+    DATA_FILE.write_text(text, encoding="utf-8")
+    BACKUP_FILE.write_text(text, encoding="utf-8")
 
 
-def league_to_sport_key(league_id: Optional[int]) -> Optional[str]:
-    if league_id is None:
-        return None
-    for key, cfg in SPORTS.items():
-        if cfg["league_id"] == league_id:
-            return key
-    return None
-
-
-def normalize_tier(raw: Dict[str, Any]) -> str:
-    val = (
-        raw.get("tier")
-        or raw.get("odds_Type")
-        or raw.get("odds_type")
-        or raw.get("oddsType")
-        or ""
-    )
-    val = str(val).strip().lower()
-
-    if val in ALLOWED_TIERS:
-        return val
-    if val.startswith("goblin"):
-        return "goblin"
-    if val.startswith("demon"):
-        return "demon"
-    return "standard"
-
-
-def infer_sport_key_from_prop(p: Dict[str, Any]) -> Optional[str]:
-    sk = p.get("sport_key")
-    if isinstance(sk, str) and sk in SPORTS:
-        return sk
-
-    # Try mapping from friendly name
-    s_label = p.get("sport")
-    if isinstance(s_label, str):
-        low = s_label.lower()
-        for key, cfg in SPORTS.items():
-            if low == cfg["name"].lower():
-                return key
-
-    # Try league_id
-    league_id = p.get("league_id")
-    try:
-        lid = int(league_id)
-    except Exception:
-        lid = None
-    if lid is not None:
-        sk = league_to_sport_key(lid)
-        if sk:
-            return sk
-
-    return None
-
-
-def normalize_prop(raw: Dict[str, Any], default_sport_key: Optional[str] = None) -> Dict[str, Any]:
-    # Basic fields, with defensive fallbacks
-    player = (
-        raw.get("player")
-        or raw.get("name")
-        or raw.get("Player")
-        or raw.get("player_name")
-        or ""
-    )
-    team = (
-        raw.get("team")
-        or raw.get("Team")
-        or raw.get("team_abbrev")
-        or raw.get("team_name")
-        or ""
-    )
-    opponent = (
-        raw.get("opponent")
-        or raw.get("Opponent")
-        or raw.get("opp")
-        or raw.get("opponent_abbrev")
-        or ""
-    )
-    stat = (
-        raw.get("stat")
-        or raw.get("Stat")
-        or raw.get("market")
-        or raw.get("stat_type")
-        or ""
-    )
-    category = (
-        raw.get("category")
-        or raw.get("Category")
-        or raw.get("stat_category")
-        or stat
-    )
-
-    line_val = (
-        raw.get("line")
-        or raw.get("Line")
-        or raw.get("line_score")
-        or raw.get("value")
-        or raw.get("projection")
-    )
-    try:
-        line_f: Optional[float] = float(line_val) if line_val is not None else None
-    except Exception:
-        line_f = None
-
-    league_id_val = (
-        raw.get("league_id")
-        or raw.get("LeagueId")
-        or raw.get("league")
-        or raw.get("leagueID")
-    )
-    try:
-        league_id_int: Optional[int] = (
-            int(league_id_val)
-            if league_id_val is not None and str(league_id_val).strip() != ""
-            else None
-        )
-    except Exception:
-        league_id_int = None
-
-    # Detect sport key
-    sport_val = raw.get("sport") or raw.get("Sport")
-    sport_key: Optional[str] = None
-    if isinstance(sport_val, str):
-        sv = sport_val.strip().lower()
-        if sv in SPORTS:
-            sport_key = sv
-
-    if sport_key is None and league_id_int is not None:
-        sport_key = league_to_sport_key(league_id_int)
-
-    if sport_key is None and default_sport_key:
-        sport_key = default_sport_key
-
-    sport_label = (
-        SPORTS[sport_key]["name"] if sport_key and sport_key in SPORTS else (sport_val or "")
-    )
-
-    tier = normalize_tier(raw)
-    game_time = (
-        raw.get("game_time")
-        or raw.get("start_time")
-        or raw.get("GameTime")
-        or raw.get("kickoff")
-    )
-
-    pid = raw.get("id") or raw.get("prop_id") or raw.get("projection_id")
-    if pid is None:
-        pid = f"{player}-{sport_label}-{stat}-{line_f}"
-
-    return {
-        "id": str(pid),
-        "player": player,
-        "team": team,
-        "opponent": opponent,
-        "stat": stat,
-        "category": category,
-        "line": line_f,
-        "sport": sport_label,
-        "sport_key": sport_key,
-        "league_id": league_id_int,
-        "tier": tier,
-        "game_time": game_time,
-    }
-
-
-def normalize_uploaded_blob(blob: Any, selected_sport_key: Optional[str]) -> List[Dict[str, Any]]:
-    props: List[Dict[str, Any]] = []
-
-    if isinstance(blob, dict):
-        if "props" in blob and isinstance(blob["props"], list):
-            items = blob["props"]
-        elif "projections" in blob and isinstance(blob["projections"], list):
-            items = blob["projections"]
-        else:
-            items = [blob]
-    elif isinstance(blob, list):
-        items = blob
-    else:
-        raise ValueError("Uploaded JSON must be an object or an array of objects.")
-
-    for raw in items:
-        if not isinstance(raw, dict):
-            continue
-        props.append(normalize_prop(raw, default_sport_key=selected_sport_key))
-
-    return props
-
-
-def load_props_from_disk() -> List[Dict[str, Any]]:
-    global CURRENT_PROPS
-    if CURRENT_PROPS:
-        return CURRENT_PROPS
-
-    if os.path.exists(DATA_FILE):
+def load_file_props_raw_or_empty() -> List[Dict[str, Any]]:
+    """
+    Load props from disk without adding dummy values.
+    Prefer main file, then backup. Return [] if nothing valid.
+    """
+    if DATA_FILE.exists():
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                CURRENT_PROPS = json.load(f)
-                return CURRENT_PROPS
+            with DATA_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
         except Exception:
             pass
 
-    # Fallback dummy props if nothing stored yet
-    CURRENT_PROPS = [
-        {
-            "id": "demo-nba-1",
-            "player": "Demo Player",
-            "team": "LAL",
-            "opponent": "BOS",
-            "stat": "Points",
-            "category": "PTS",
-            "line": 24.5,
-            "sport": "NBA",
-            "sport_key": "nba",
-            "league_id": 7,
-            "tier": "standard",
-            "game_time": None,
-        }
-    ]
-    return CURRENT_PROPS
+    if BACKUP_FILE.exists():
+        try:
+            with BACKUP_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    return []
 
 
-def save_props_to_disk(props: List[Dict[str, Any]]) -> None:
-    global CURRENT_PROPS
-    CURRENT_PROPS = props
+def _parse_game_time(value: Any) -> Optional[datetime]:
+    """
+    Best-effort parse of the game_time string into an aware datetime in UTC.
+    Returns None if parsing fails or value is empty.
+    """
+    if not value:
+        return None
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(props, f, ensure_ascii=False)
+        s = str(value).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
-        # Not fatal if write fails on Render
-        pass
+        return None
 
 
 def get_current_props() -> List[Dict[str, Any]]:
-    return load_props_from_disk()
+    """
+    Load props and drop any whose game_time is already in the past.
+    Writes the cleaned list back to disk when it changes.
+    No dummy fallback: returns [] if nothing is stored.
+    """
+    raw = load_file_props_raw_or_empty()
+    if not raw:
+        return []
+
+    now = datetime.now(timezone.utc)
+    filtered: List[Dict[str, Any]] = []
+    changed = False
+
+    for p in raw:
+        gt = _parse_game_time(p.get("game_time"))
+        if gt is None:
+            # If no time or can't parse, keep it rather than silently delete.
+            filtered.append(p)
+            continue
+        if gt >= now:
+            filtered.append(p)
+        else:
+            changed = True
+
+    if changed:
+        save_props(filtered)
+
+    return filtered
+
+# -------------------------------------------------------------------
+# Normalization of PrizePicks JSON
+# -------------------------------------------------------------------
 
 
-def props_to_csv_rows(props: List[Dict[str, Any]]) -> str:
-    lines: List[str] = [",".join(CSV_COLUMNS)]
-    for p in props:
-        row: List[str] = []
-        for col in CSV_COLUMNS:
-            v = p.get(col, "")
-            if v is None:
-                v = ""
-            sval = str(v)
-            if "," in sval or '"' in sval or "\n" in sval:
-                sval = '"' + sval.replace('"', '""') + '"'
-            row.append(sval)
-        lines.append(",".join(row))
-    return "\n".join(lines)
+def _extract_tier_from_attrs(attrs: Dict[str, Any]) -> str:
+    """
+    Map attributes['odds_Type'] (or variations) into "goblin" / "standard" / "demon".
+    """
+    raw = (
+        attrs.get("odds_Type")
+        or attrs.get("odds_type")
+        or attrs.get("oddsType")
+        or attrs.get("tier")
+    )
+    if not raw:
+        return "standard"
+
+    t = str(raw).strip().lower()
+
+    if "goblin" in t:
+        return "goblin"
+    if "demon" in t:
+        return "demon"
+    if "standard" in t or "normal" in t:
+        return "standard"
+
+    return "standard"
 
 
-# -----------------------------
-# Routes
-# -----------------------------
+def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, Any]]:
+    """
+    Turn a raw PrizePicks JSON blob into a simple list of props.
+    Enforces that the JSON's league_id matches the selected sport (when known).
+    """
+    if sport_key not in SPORTS:
+        raise ValueError(f"Unknown sport key: {sport_key}")
+
+    sport_cfg = SPORTS[sport_key]
+    sport_name = sport_cfg["name"]
+    expected_league_id = sport_cfg["league_id"]
+
+    data = raw.get("data", []) or []
+    included = raw.get("included", []) or []
+
+    # Validate league_id when possible
+    league_ids = set()
+    for proj in data:
+        attrs = proj.get("attributes", {}) or {}
+        rel_league = (proj.get("relationships", {}).get("league") or {}).get("data") or {}
+        lid_rel = rel_league.get("id")
+        if lid_rel is not None:
+            league_ids.add(str(lid_rel))
+        lid_attr = attrs.get("league_id")
+        if lid_attr is not None:
+            league_ids.add(str(lid_attr))
+
+    if expected_league_id and league_ids and league_ids != {expected_league_id}:
+        raise ValueError(
+            f"League mismatch: selected {sport_name} (league_id {expected_league_id}), "
+            f"but JSON contained league ids {sorted(league_ids)}"
+        )
+
+    # Build helper maps from "included"
+    players: Dict[str, Dict[str, Any]] = {}
+    games: Dict[str, Dict[str, Any]] = {}
+    teams: Dict[str, Dict[str, Any]] = {}
+
+    for item in included:
+        itype = item.get("type")
+        attrs = item.get("attributes", {}) or {}
+        iid = item.get("id")
+        if not iid:
+            continue
+
+        if itype in ("new_player", "player"):
+            players[iid] = {
+                "name": attrs.get("name"),
+                "team": attrs.get("team")
+                or attrs.get("team_abbreviation")
+                or "",
+                "league": attrs.get("league") or sport_name,
+            }
+        elif itype == "team":
+            teams[iid] = {
+                "abbreviation": attrs.get("abbreviation") or "",
+                "name": attrs.get("name") or "",
+                "market": attrs.get("market") or "",
+            }
+        elif itype == "game":
+            rel = item.get("relationships", {}) or {}
+            home_rel = (rel.get("home_team_data") or {}).get("data") or {}
+            away_rel = (rel.get("away_team_data") or {}).get("data") or {}
+            games[iid] = {
+                "home_team_id": home_rel.get("id"),
+                "away_team_id": away_rel.get("id"),
+                "start_time": attrs.get("start_time")
+                or attrs.get("start_at"),
+            }
+
+    props: List[Dict[str, Any]] = []
+
+    for proj in data:
+        try:
+            pid = proj.get("id")
+            attrs = proj.get("attributes", {}) or {}
+            rel = proj.get("relationships", {}) or {}
+            if not pid:
+                continue
+
+            player_rel = (rel.get("new_player") or rel.get("player") or {}).get("data") or {}
+            game_rel = (rel.get("game") or {}).get("data") or {}
+
+            player_id = player_rel.get("id")
+            game_id = game_rel.get("id")
+
+            player_info = players.get(player_id, {})
+            game_info = games.get(game_id, {})
+
+            player = player_info.get("name") or "Unknown"
+            team = player_info.get("team") or ""
+            league = player_info.get("league") or sport_name
+
+            home_team_abbr = None
+            away_team_abbr = None
+            if game_info:
+                home_team_id = game_info.get("home_team_id")
+                away_team_id = game_info.get("away_team_id")
+                if home_team_id and home_team_id in teams:
+                    home_team_abbr = teams[home_team_id]["abbreviation"]
+                if away_team_id and away_team_id in teams:
+                    away_team_abbr = teams[away_team_id]["abbreviation"]
+
+            opponent = ""
+            if team and home_team_abbr and away_team_abbr:
+                if team == home_team_abbr:
+                    opponent = away_team_abbr
+                elif team == away_team_abbr:
+                    opponent = home_team_abbr
+
+            if not opponent and home_team_abbr and away_team_abbr:
+                desc_team = attrs.get("description")
+                if desc_team == home_team_abbr:
+                    opponent = away_team_abbr
+                elif desc_team == away_team_abbr:
+                    opponent = home_team_abbr
+
+            stat = (
+                attrs.get("stat_type")
+                or attrs.get("stat")
+                or attrs.get("stat_display_name")
+                or ""
+            )
+            line = attrs.get("line_score")
+            if line is not None:
+                try:
+                    line = float(line)
+                except Exception:
+                    line = None
+
+            start_time = game_info.get("start_time") or attrs.get("start_time") or attrs.get("start_at")
+
+            tier = _extract_tier_from_attrs(attrs)
+
+            if not player or line is None or not stat:
+                continue
+
+            props.append(
+                {
+                    "id": pid,
+                    "source": "uploaded",
+                    "board": sport_name,
+                    "league": league,
+                    "sport": sport_name,
+                    "player": player,
+                    "team": team,
+                    "opponent": opponent,
+                    "stat": stat,
+                    "market": str(stat).lower().replace(" ", "_"),
+                    "line": line,
+                    "game_time": start_time,
+                    "projection_type": "main",
+                    "tier": tier,
+                }
+            )
+        except Exception:
+            # Skip malformed entries rather than killing the whole upload
+            continue
+
+    return props
+
+# -------------------------------------------------------------------
+# Small util for CSV cleanup
+# -------------------------------------------------------------------
+
+
+def _clean_csv_val(v: Any) -> str:
+    """Make sure CSV values don't break the row."""
+    return str(v).replace(",", " ").replace("\n", " ").strip()
+
+# -------------------------------------------------------------------
+# Health
+# -------------------------------------------------------------------
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+# -------------------------------------------------------------------
+# Main odds board UI
+# -------------------------------------------------------------------
 
 
 @app.get("/", response_class=HTMLResponse)
-def home() -> HTMLResponse:
-    props = get_current_props()
-
-    # Sort by sport, then game time, then player
-    def sort_key(p: Dict[str, Any]) -> Tuple[str, str, str]:
-        skey = infer_sport_key_from_prop(p) or ""
-        t = p.get("game_time") or ""
-        pl = p.get("player") or ""
-        return (skey, t, pl)
-
-    props_sorted = sorted(props, key=sort_key)
-
-    # Build table rows
-    rows_html = ""
-    for p in props_sorted:
-        skey = infer_sport_key_from_prop(p) or ""
-        sport_label = p.get("sport") or ""
-        tier = str(p.get("tier", "standard")).lower()
-        player = p.get("player", "")
-        team = p.get("team", "")
-        opp = p.get("opponent", "")
-        stat = p.get("stat", "")
-        line = p.get("line", "")
-        game_time = p.get("game_time") or ""
-
-        rows_html += f"""
-        <tr data-sport="{skey}" data-tier="{tier}">
-          <td>{sport_label}</td>
-          <td>{tier.capitalize()}</td>
-          <td>{player}</td>
-          <td>{team}</td>
-          <td>{opp}</td>
-          <td>{stat}</td>
-          <td>{line}</td>
-          <td>{game_time}</td>
-        </tr>
-        """
-
-    # Sport filter options
-    sport_options_html = ""
-    for skey, cfg in SPORTS.items():
-        sport_options_html += f'<option value="{skey}">{cfg["name"]}</option>'
-
-    html = f"""
+def board_view():
+    """
+    Main odds board UI. Data is fetched from /props.json (which uses get_current_props()).
+    """
+    return """
     <html>
       <head>
-        <title>Odds Board</title>
+        <title>Props Board Viewer</title>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
-          :root {{ color-scheme: dark; }}
-          body {{
+          :root { color-scheme: dark; }
+          body {
             margin: 0;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background: #020617;
             color: #e5e7eb;
-          }}
-          main {{
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 1.5rem 1.25rem 2rem;
-          }}
-          h1 {{
-            font-size: 1.4rem;
-            margin-bottom: 0.25rem;
-          }}
-          p.sub {{
-            font-size: 0.85rem;
-            color: #9ca3af;
-            margin-bottom: 1rem;
-          }}
-          .toolbar {{
+          }
+          header {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid #1f2937;
             display: flex;
             flex-wrap: wrap;
-            gap: 0.75rem;
+            justify-content: space-between;
             align-items: center;
-            margin-bottom: 1rem;
-          }}
-          select, button {{
-            background: #020617;
-            color: #e5e7eb;
-            border-radius: 9999px;
-            border: 1px solid #4b5563;
-            padding: 0.35rem 0.75rem;
-            font-size: 0.8rem;
-          }}
-          table {{
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.8rem;
-          }}
-          thead tr {{
+            gap: 0.5rem;
             background: #020617;
             position: sticky;
             top: 0;
-            z-index: 5;
-          }}
-          th, td {{
-            padding: 0.4rem 0.5rem;
-            border-bottom: 1px solid #111827;
-            text-align: left;
-            white-space: nowrap;
-          }}
-          th {{
+            z-index: 10;
+          }
+          header h1 {
+            font-size: 1.1rem;
+            margin: 0;
+          }
+          header h1 span {
             font-weight: 600;
+            color: #38bdf8;
+          }
+          header nav a {
             color: #9ca3af;
-          }}
-          tbody tr:nth-child(even) {{
-            background: #020617;
-          }}
-          tbody tr:nth-child(odd) {{
-            background: #030712;
-          }}
-          .badge {{
-            display: inline-block;
-            font-size: 0.7rem;
-            padding: 0.1rem 0.45rem;
+            text-decoration: none;
+            font-size: 0.9rem;
+            margin-left: 0.75rem;
+          }
+          header nav a:hover { color: #e5e7eb; }
+          main {
+            padding: 1rem 1.25rem 1.5rem;
+            max-width: 1100px;
+            margin: 0 auto;
+          }
+          .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+            align-items: center;
+          }
+          .controls input, .controls select {
+            padding: 0.45rem 0.65rem;
             border-radius: 9999px;
-          }}
-          .tier-standard {{
+            border: 1px solid #4b5563;
+            background-color: #020617;
+            color: #e5e7eb;
+            font-size: 0.85rem;
+            outline: none;
+          }
+          .controls input::placeholder { color: #6b7280; }
+          .controls button {
+            padding: 0.45rem 0.9rem;
+            border-radius: 9999px;
+            border: none;
+            font-size: 0.85rem;
+            cursor: pointer;
+            background: #22c55e;
+            color: white;
+          }
+          .controls small {
+            font-size: 0.75rem;
+            color: #9ca3af;
+          }
+          .table-wrapper {
+            border-radius: 0.75rem;
+            border: 1px solid #1f2937;
+            overflow: hidden;
+            background: #020617;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+          }
+          thead {
+            background: #111827;
+          }
+          thead th {
+            text-align: left;
+            padding: 0.5rem 0.6rem;
+            white-space: nowrap;
+            font-weight: 500;
+            color: #e5e7eb;
+            border-bottom: 1px solid #1f2937;
+          }
+          tbody tr:nth-child(even) { background-color: #020617; }
+          tbody tr:nth-child(odd) { background-color: #020617; }
+          tbody td {
+            padding: 0.45rem 0.6rem;
+            border-bottom: 1px solid #111827;
+          }
+          tbody tr:hover { background-color: #111827; }
+          .pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.15rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.7rem;
             border: 1px solid #4b5563;
             color: #e5e7eb;
-          }}
-          .tier-goblin {{
-            border: 1px solid #22c55e;
-            color: #22c55e;
-          }}
-          .tier-demon {{
-            border: 1px solid #f97316;
-            color: #f97316;
-          }}
+          }
+          .pill.tier-goblin {
+            border-color: #fbbf24;
+            color: #fbbf24;
+          }
+          .pill.tier-demon {
+            border-color: #f97373;
+            color: #fecaca;
+          }
+          .pill.time {
+            border-color: #facc15;
+            color: #facc15;
+          }
+          .pill.league {
+            border-color: #22c55e;
+            color: #bbf7d0;
+          }
         </style>
       </head>
       <body>
+        <header>
+          <h1><span>Props Board</span> · Multi-Sport Proxy</h1>
+          <nav>
+            <a href="/">Board</a>
+            <a href="/upload">Upload</a>
+            <a href="/export">Export</a>
+            <a href="/model-index">Model Index</a>
+          </nav>
+        </header>
         <main>
-          <h1>Odds Board</h1>
-          <p class="sub">
-            This table reflects the last uploaded props. Use sport/tier filters below to view slices.
-          </p>
-
-          <div class="toolbar">
-            <label>
-              Sport:
-              <select id="sportFilter">
-                <option value="">All</option>
-                {sport_options_html}
-              </select>
-            </label>
-            <label>
-              Tier:
-              <select id="tierFilter">
-                <option value="">All</option>
-                <option value="standard">Standard</option>
-                <option value="goblin">Goblin</option>
-                <option value="demon">Demon</option>
-              </select>
-            </label>
+          <div class="controls">
+            <input id="search" type="text" placeholder="Search player, team, opponent…" />
+            <select id="stat-filter">
+              <option value="">All stats</option>
+            </select>
+            <select id="sport-filter">
+              <option value="">All sports</option>
+            </select>
+            <button type="button" onclick="reloadProps()">Reload</button>
+            <small id="status">Loading props…</small>
           </div>
 
-          <div style="overflow-x:auto; border-radius: 0.75rem; border: 1px solid #111827;">
+          <div class="table-wrapper">
             <table>
               <thead>
                 <tr>
-                  <th>Sport</th>
-                  <th>Tier</th>
                   <th>Player</th>
                   <th>Team</th>
                   <th>Opponent</th>
                   <th>Stat</th>
                   <th>Line</th>
+                  <th>Tier</th>
                   <th>Game Time</th>
+                  <th>Sport</th>
                 </tr>
               </thead>
-              <tbody id="propsBody">
-                {rows_html}
+              <tbody id="props-body">
+                <tr><td colspan="8">Loading…</td></tr>
               </tbody>
             </table>
           </div>
-
         </main>
 
         <script>
-          const sportFilter = document.getElementById('sportFilter');
-          const tierFilter = document.getElementById('tierFilter');
-          const tbody = document.getElementById('propsBody');
+          let allProps = [];
 
-          function applyFilters() {{
-            const sportVal = sportFilter.value;
-            const tierVal = tierFilter.value;
-            const rows = tbody.querySelectorAll('tr');
+          function sportName(p) {
+            return p.sport || p.league || "";
+          }
 
-            rows.forEach(row => {{
-              const rsport = row.getAttribute('data-sport') || '';
-              const rtier = row.getAttribute('data-tier') || '';
-              let show = true;
-              if (sportVal && rsport !== sportVal) show = false;
-              if (tierVal && rtier !== tierVal) show = false;
-              row.style.display = show ? '' : 'none';
-            }});
-          }}
+          function formatTime(isoString) {
+            if (!isoString) return "";
+            try {
+              const d = new Date(isoString);
+              if (isNaN(d.getTime())) return isoString;
+              return d.toLocaleString();
+            } catch (e) {
+              return isoString;
+            }
+          }
 
-          sportFilter.addEventListener('change', applyFilters);
-          tierFilter.addEventListener('change', applyFilters);
+          function getTierRaw(p) {
+            if (!p.tier) return "";
+            return String(p.tier).toLowerCase();
+          }
+
+          function renderStatFilter(props) {
+            const select = document.getElementById("stat-filter");
+            const current = select.value;
+            const stats = Array.from(new Set(props.map(p => p.stat || "").filter(Boolean))).sort();
+
+            select.innerHTML = "";
+            const all = document.createElement("option");
+            all.value = "";
+            all.textContent = "All stats";
+            select.appendChild(all);
+
+            for (const stat of stats) {
+              const opt = document.createElement("option");
+              opt.value = stat;
+              opt.textContent = stat;
+              select.appendChild(opt);
+            }
+
+            if (current) select.value = current;
+          }
+
+          function renderSportFilter(props) {
+            const select = document.getElementById("sport-filter");
+            const current = select.value;
+            const sports = Array.from(new Set(props.map(p => sportName(p)).filter(Boolean))).sort();
+
+            select.innerHTML = "";
+            const all = document.createElement("option");
+            all.value = "";
+            all.textContent = "All sports";
+            select.appendChild(all);
+
+            for (const s of sports) {
+              const opt = document.createElement("option");
+              opt.value = s;
+              opt.textContent = s;
+              select.appendChild(opt);
+            }
+
+            if (current) select.value = current;
+          }
+
+          function renderTable(props) {
+            const tbody = document.getElementById("props-body");
+            tbody.innerHTML = "";
+
+            if (!props.length) {
+              const tr = document.createElement("tr");
+              const td = document.createElement("td");
+              td.colSpan = 8;
+              td.textContent = "No props match the current filters or nothing has been uploaded yet.";
+              tr.appendChild(td);
+              tbody.appendChild(tr);
+              return;
+            }
+
+            for (const p of props) {
+              const tr = document.createElement("tr");
+
+              const tdPlayer = document.createElement("td");
+              tdPlayer.textContent = p.player || "";
+              tr.appendChild(tdPlayer);
+
+              const tdTeam = document.createElement("td");
+              tdTeam.textContent = p.team || "";
+              tr.appendChild(tdTeam);
+
+              const tdOpp = document.createElement("td");
+              tdOpp.textContent = p.opponent || "";
+              tr.appendChild(tdOpp);
+
+              const tdStat = document.createElement("td");
+              tdStat.textContent = p.stat || "";
+              tr.appendChild(tdStat);
+
+              const tdLine = document.createElement("td");
+              tdLine.textContent = p.line != null ? p.line : "";
+              tr.appendChild(tdLine);
+
+              const tdTier = document.createElement("td");
+              const tierRaw = getTierRaw(p);
+              if (tierRaw) {
+                const pillTier = document.createElement("span");
+                let cls = "pill";
+                let label = tierRaw;
+                if (tierRaw === "goblin") {
+                  cls += " tier-goblin";
+                  label = "Goblin";
+                } else if (tierRaw === "demon") {
+                  cls += " tier-demon";
+                  label = "Demon";
+                }
+                pillTier.className = cls;
+                pillTier.textContent = label;
+                tdTier.appendChild(pillTier);
+              }
+              tr.appendChild(tdTier);
+
+              const tdTime = document.createElement("td");
+              if (p.game_time) {
+                const pillTime = document.createElement("span");
+                pillTime.className = "pill time";
+                pillTime.textContent = formatTime(p.game_time);
+                tdTime.appendChild(pillTime);
+              }
+              tr.appendChild(tdTime);
+
+              const tdSport = document.createElement("td");
+              const pillLeague = document.createElement("span");
+              pillLeague.className = "pill league";
+              pillLeague.textContent = sportName(p);
+              tdSport.appendChild(pillLeague);
+              tr.appendChild(tdSport);
+
+              tbody.appendChild(tr);
+            }
+          }
+
+          function applyFilters() {
+            const searchVal = document.getElementById("search").value.toLowerCase().trim();
+            const statVal = document.getElementById("stat-filter").value;
+            const sportVal = document.getElementById("sport-filter").value;
+            let filtered = allProps.slice();
+
+            if (searchVal) {
+              filtered = filtered.filter(p => {
+                return (
+                  (p.player || "").toLowerCase().includes(searchVal) ||
+                  (p.team || "").toLowerCase().includes(searchVal) ||
+                  (p.opponent || "").toLowerCase().includes(searchVal)
+                );
+              });
+            }
+
+            if (statVal) {
+              filtered = filtered.filter(p => p.stat === statVal);
+            }
+
+            if (sportVal) {
+              filtered = filtered.filter(p => sportName(p) === sportVal);
+            }
+
+            renderTable(filtered);
+          }
+
+          async function reloadProps() {
+            const status = document.getElementById("status");
+            status.textContent = "Refreshing…";
+            try {
+              const res = await fetch("/props.json");
+              const data = await res.json();
+              if (!Array.isArray(data)) {
+                status.textContent = "Unexpected data format from /props.json";
+                return;
+              }
+              allProps = data;
+              renderStatFilter(allProps);
+              renderSportFilter(allProps);
+              applyFilters();
+              status.textContent = "Loaded " + allProps.length + " props.";
+            } catch (e) {
+              status.textContent = "Error loading props: " + e;
+            }
+          }
+
+          document.addEventListener("DOMContentLoaded", () => {
+            document.getElementById("search").addEventListener("input", applyFilters);
+            document.getElementById("stat-filter").addEventListener("change", applyFilters);
+            document.getElementById("sport-filter").addEventListener("change", applyFilters);
+            reloadProps();
+          });
         </script>
       </body>
     </html>
     """
-    return HTMLResponse(html)
+
+# -------------------------------------------------------------------
+# Raw props JSON (for UI & scripts)
+# -------------------------------------------------------------------
 
 
-@app.get("/upload", response_class=HTMLResponse)
-def upload_get(request: Request, sport: str = "", saved: str = "") -> HTMLResponse:
-    # sport dropdown
-    sport_options_html = ""
-    for skey, cfg in SPORTS.items():
-        selected = "selected" if skey == sport else ""
-        sport_options_html += f'<option value="{skey}" {selected}>{cfg["name"]}</option>'
-
-    saved_msg = ""
-    if saved:
-        saved_msg = "<p style='color:#22c55e;font-size:0.85rem;margin-top:0.5rem;'>Props uploaded and saved.</p>"
-
-    html = f"""
-    <html>
-      <head>
-        <title>Upload Props JSON</title>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <style>
-          :root {{ color-scheme: dark; }}
-          body {{
-            margin: 0;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #020617;
-            color: #e5e7eb;
-          }}
-          main {{
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 1.5rem 1.25rem 2rem;
-          }}
-          label {{
-            font-size: 0.9rem;
-            display: block;
-            margin-bottom: 0.25rem;
-          }}
-          select {{
-            background: #020617;
-            color: #e5e7eb;
-            border-radius: 9999px;
-            border: 1px solid #4b5563;
-            padding: 0.35rem 0.75rem;
-            font-size: 0.8rem;
-          }}
-          textarea {{
-            width: 100%;
-            min-height: 260px;
-            background: #020617;
-            color: #e5e7eb;
-            border-radius: 0.75rem;
-            border: 1px solid #111827;
-            padding: 0.75rem;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-            font-size: 0.8rem;
-          }}
-          button {{
-            margin-top: 0.75rem;
-            background: #22c55e;
-            color: #020617;
-            border-radius: 9999px;
-            border: none;
-            padding: 0.45rem 0.9rem;
-            font-size: 0.85rem;
-            font-weight: 600;
-            cursor: pointer;
-          }}
-          button:hover {{
-            filter: brightness(1.05);
-          }}
-          p.sub {{
-            font-size: 0.85rem;
-            color: #9ca3af;
-            margin-bottom: 1rem;
-          }}
-        </style>
-      </head>
-      <body>
-        <main>
-          <h1>Upload Props JSON</h1>
-          <p class="sub">
-            Paste processed JSON (array or object with <code>props</code> / <code>projections</code>).
-            The selected sport will be applied if league IDs are missing.
-          </p>
-          <form method="post">
-            <label for="sport">Sport</label>
-            <select id="sport" name="sport">
-              {sport_options_html}
-            </select>
-            {saved_msg}
-            <label for="raw_json" style="margin-top:1rem;">JSON</label>
-            <textarea id="raw_json" name="raw_json" placeholder='[ {{ "player": "...", "team": "...", ... }} ]'></textarea>
-            <button type="submit">Upload</button>
-          </form>
-        </main>
-
-        <script>
-          document.addEventListener('DOMContentLoaded', function() {{
-            const sportSelect = document.getElementById('sport');
-            const textarea = document.getElementById('raw_json');
-            let lastSport = sportSelect.value;
-
-            sportSelect.addEventListener('change', function() {{
-              // clear textarea anytime sport changes, to avoid cross-sport paste
-              textarea.value = '';
-              lastSport = sportSelect.value;
-            }});
-          }});
-        </script>
-      </body>
-    </html>
+@app.get("/props.json")
+def props_json():
     """
-    return HTMLResponse(html)
-
-
-@app.post("/upload", response_class=HTMLResponse)
-async def upload_post(
-    sport: str = Form(...),
-    raw_json: str = Form(...),
-) -> HTMLResponse:
-    skey = sport.lower()
-    if skey not in SPORTS:
-        raise HTTPException(status_code=400, detail="Unknown sport key.")
-
-    raw_json_stripped = (raw_json or "").strip()
-    if not raw_json_stripped:
-        raise HTTPException(status_code=400, detail="No JSON provided.")
-
-    try:
-        blob = json.loads(raw_json_stripped)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-
-    new_props = normalize_uploaded_blob(blob, selected_sport_key=skey)
-
-    # Optional sanity: check for obvious cross-sport mistakes when league_id present
-    mismatches: List[Dict[str, Any]] = []
-    for p in new_props:
-        pk = infer_sport_key_from_prop(p)
-        if pk is not None and pk != skey:
-            mismatches.append(p)
-
-    if mismatches:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Some props appear to belong to a different sport than '{skey}'. Check league_id / JSON.",
-        )
-
-    # Merge: replace this sport's props, keep others
-    existing = get_current_props()
-    remaining = [p for p in existing if infer_sport_key_from_prop(p) != skey]
-    combined = remaining + new_props
-    save_props_to_disk(combined)
-
-    # Redirect to GET /upload so refresh doesn't resubmit
-    return RedirectResponse(url=f"/upload?saved=1&sport={skey}", status_code=303)
-
-
-@app.get("/props.json", response_class=JSONResponse)
-def props_json() -> JSONResponse:
-    return JSONResponse(get_current_props())
-
-
-@app.get("/model-board-json", response_class=JSONResponse)
-def model_board_json_all() -> JSONResponse:
-    """Raw JSON model board (for you; JSON is opaque to the model)."""
-    return JSONResponse(get_current_props())
-
-
-@app.get(
-    "/model-board/{sport}/page/{page}",
-    response_class=PlainTextResponse,
-)
-def model_board_paged(
-    sport: str,
-    page: int,
-    page_size: int = 80,  # smaller pages to avoid truncation
-    tiers: str = "",
-) -> PlainTextResponse:
-    skey = sport.lower()
-    if skey not in SPORTS:
-        raise HTTPException(status_code=400, detail="Unknown sport key.")
-
+    Raw JSON for the live board, with expired props removed.
+    """
     props = get_current_props()
-    filtered = [p for p in props if infer_sport_key_from_prop(p) == skey]
+    return JSONResponse(props)
 
-    tiers_str = (tiers or "").strip().lower()
+# -------------------------------------------------------------------
+# Model-board CSV helpers
+# -------------------------------------------------------------------
+
+
+def _build_model_page_text(
+    sport_key: str,
+    tiers_str: Optional[str],
+    page: int,
+    page_size: int,
+) -> str:
+    """
+    Build a single CSV page for the model-board endpoints.
+
+    - sport_key: "all" or one of SPORTS keys (nfl, nba, nhl, cbb, cfb, etc.)
+    - tiers_str: "standard+goblin", "goblin", "demon", etc. or None for all tiers
+    - page: 1-based page index
+    - page_size: number of props per page (150 recommended)
+    """
+    sport_key = sport_key.lower()
+
+    if sport_key != "all" and sport_key not in SPORTS:
+        raise HTTPException(status_code=404, detail="Unknown sport key")
+
+    # Parse tiers
+    tier_set: Optional[set] = None
     if tiers_str:
-        allowed: set[str] = set()
-        for token in tiers_str.replace(",", "+").split("+"):
-            t = token.strip()
-            if t in ALLOWED_TIERS:
-                allowed.add(t)
-        if allowed:
-            filtered = [
-                p
-                for p in filtered
-                if (str(p.get("tier", "standard")).lower() in allowed)
-            ]
+        parts = [t.strip().lower() for t in tiers_str.split("+") if t.strip()]
+        tmp = set()
+        for t in parts:
+            if t not in ALLOWED_TIERS:
+                raise HTTPException(status_code=400, detail=f"Invalid tier '{t}'")
+            tmp.add(t)
+        if not tmp:
+            raise HTTPException(status_code=400, detail="No valid tiers")
+        tier_set = tmp
 
-    # Sort by game_time then player for stability
-    def sort_key(p: Dict[str, Any]) -> Tuple[str, str]:
-        t = p.get("game_time") or ""
-        pl = p.get("player") or ""
-        return (t, pl)
+    all_props = get_current_props()
 
-    filtered.sort(key=sort_key)
+    # Filter by sport
+    if sport_key == "all":
+        filtered = all_props
+    else:
+        sport_name = SPORTS[sport_key]["name"]
+        filtered = [
+            p for p in all_props
+            if (p.get("sport") or "").lower() == sport_name.lower()
+        ]
+
+    # Filter by tier if requested
+    if tier_set is not None:
+        filtered = [
+            p for p in filtered
+            if str(p.get("tier", "")).lower() in tier_set
+        ]
+
+    # Sort for predictability
+    filtered.sort(
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    total = len(filtered)
+    if total == 0:
+        return "sport,player,team,opponent,stat,line,tier,game_time\n"
 
     if page < 1:
         raise HTTPException(status_code=400, detail="Page must be >= 1")
 
+    total_pages = (total + page_size - 1) // page_size
+    if page > total_pages:
+        raise HTTPException(status_code=404, detail=f"Page {page} out of range (total_pages={total_pages})")
+
     start = (page - 1) * page_size
     end = start + page_size
-    page_items = filtered[start:end]
+    page_props = filtered[start:end]
 
-    csv_text = props_to_csv_rows(page_items)
-    return PlainTextResponse(csv_text)
+    lines: List[str] = []
+    header = "sport,player,team,opponent,stat,line,tier,game_time"
+    lines.append(header)
+
+    for p in page_props:
+        line = ",".join(
+            [
+                _clean_csv_val(p.get("sport", "")),
+                _clean_csv_val(p.get("player", "")),
+                _clean_csv_val(p.get("team", "")),
+                _clean_csv_val(p.get("opponent", "")),
+                _clean_csv_val(p.get("stat", "")),
+                str(p.get("line", "")),
+                _clean_csv_val(p.get("tier", "")),
+                _clean_csv_val(p.get("game_time", "")),
+            ]
+        )
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+@app.get("/model-board", response_class=PlainTextResponse)
+def model_board():
+    """
+    Full board as CSV in one page (debugging).
+    For the model, use /model-board/{sport}/page/{page}?tiers=...
+    """
+    text = _build_model_page_text("all", None, page=1, page_size=100000)
+    return PlainTextResponse(text)
+
+
+@app.get("/model-board/{sport}/page/{page}", response_class=PlainTextResponse)
+def model_board_paged(
+    sport: str,
+    page: int,
+    page_size: int = 150,
+    tiers: str = "",
+):
+    """
+    Paged CSV board for a single sport.
+
+    Examples:
+      /model-board/nba/page/1
+      /model-board/nba/page/1?tiers=standard
+      /model-board/nba/page/2?tiers=standard+goblin&page_size=150
+    """
+    text = _build_model_page_text(
+        sport_key=sport,
+        tiers_str=tiers or None,
+        page=page,
+        page_size=page_size,
+    )
+    return PlainTextResponse(text)
+
+# -------------------------------------------------------------------
+# Model index page (HTML with links to CSV pages)
+# -------------------------------------------------------------------
 
 
 @app.get("/model-index", response_class=HTMLResponse)
-def model_index(sport: str = "", tier: str = "") -> HTMLResponse:
+def model_index():
     """
-    HTML index of /model-board pages.
+    HTML index of all /model-board pages for each sport and tier.
 
-    Query params:
-      - sport: optional sport key (nfl,nba,nhl,cbb,cfb,soccer,tennis,cs2).
-               If omitted → all sports.
-      - tier:  optional tier filter (standard,goblin,demon).
-               If omitted → all tiers.
-
-    Example (for v4 prompts):
-      /model-index?sport=nba&tier=standard
+    The model can:
+      1) open /model-index (because you give it that URL),
+      2) then click the links for the pages it needs (NBA standard, etc.).
     """
     props = get_current_props()
 
-    # Optional sport filter
-    sport_filter_keys: List[str]
-    if sport:
-        skey = sport.lower()
-        if skey not in SPORTS:
-            raise HTTPException(status_code=400, detail="Unknown sport key.")
-        sport_filter_keys = [skey]
-    else:
-        sport_filter_keys = list(SPORTS.keys())
-
-    # Optional tier filter
-    tier_filter = tier.lower().strip() if tier else ""
+    # Map sport name -> sport_key
+    sport_name_to_key: Dict[str, str] = {}
+    for key, cfg in SPORTS.items():
+        sport_name_to_key[cfg["name"].lower()] = key
 
     # Count props per (sport_key, tier)
-    counts: Dict[Tuple[str, str], int] = {}
+    counts: Dict[tuple, int] = {}
     for p in props:
-        skey = infer_sport_key_from_prop(p)
-        if not skey or skey not in sport_filter_keys:
+        sname = (p.get("sport") or "").lower()
+        skey = sport_name_to_key.get(sname)
+        if not skey:
             continue
-        t = str(p.get("tier", "standard")).lower()
-        if t not in ALLOWED_TIERS:
-            t = "standard"
-        if tier_filter and t != tier_filter:
-            continue
-        k = (skey, t)
+        tier = str(p.get("tier", "standard")).lower()
+        if tier not in ALLOWED_TIERS:
+            tier = "standard"
+        k = (skey, tier)
         counts[k] = counts.get(k, 0) + 1
 
-    PAGE_SIZE = 80  # keep in sync with model_board_paged
+    PAGE_SIZE = 150
 
     html = """
     <html>
@@ -862,41 +966,31 @@ def model_index(sport: str = "", tier: str = "") -> HTMLResponse:
           <h1>Model Board Index</h1>
           <p>
             Each link below is a CSV page from <code>/model-board/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code>.
-            For best results with the model, call this page with a <code>sport</code> and optional <code>tier</code> query:
-            e.g. <code>/model-index?sport=nba&tier=standard</code>.
+            When you want the model to search props, give it this index URL and let it follow the links it needs.
           </p>
     """
 
-    # For each sport in filter
-    for skey in sport_filter_keys:
-        cfg = SPORTS[skey]
+    for skey, cfg in SPORTS.items():
         sname = cfg["name"]
-
-        # Does this sport have any props at all (respecting tier filter)?
         total_for_sport = sum(
-            count
-            for (s, t), count in counts.items()
-            if s == skey and (not tier_filter or t == tier_filter)
+            count for (sport_key, _tier), count in counts.items() if sport_key == skey
         )
         if total_for_sport == 0:
             continue
 
-        html += f"<h2>{sname}</h2>\n"
+        html += f"<h2>{sname} <span class='pill'>{total_for_sport} props</span></h2>\n"
 
-        for t in ["standard", "goblin", "demon"]:
-            if tier_filter and t != tier_filter:
-                continue
-
-            count = counts.get((skey, t), 0)
+        for tier in ["standard", "goblin", "demon"]:
+            count = counts.get((skey, tier), 0)
             if count == 0:
                 continue
 
             pages = (count + PAGE_SIZE - 1) // PAGE_SIZE
-            html += f"<h3>{t.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
+            html += f"<h3>{tier.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
             html += "<ul>\n"
             for page in range(1, pages + 1):
-                url = f"/model-board/{skey}/page/{page}?tiers={t}"
-                html += f"<li><a href='{url}'>{sname} · {t} · page {page}</a></li>\n"
+                url = f"/model-board/{skey}/page/{page}?tiers={tier}"
+                html += f"<li><a href='{url}'>{sname} · {tier} · page {page}</a></li>\n"
             html += "</ul>\n"
 
     html += """
@@ -906,24 +1000,232 @@ def model_index(sport: str = "", tier: str = "") -> HTMLResponse:
     """
     return HTMLResponse(html)
 
+# -------------------------------------------------------------------
+# Upload page
+# -------------------------------------------------------------------
 
-@app.get("/model-index-main", response_class=HTMLResponse)
-def model_index_main() -> HTMLResponse:
-    """
-    Small 'hub' page that links to sport/tier-specific model-index pages.
 
-    Example links:
-      /model-index?sport=nba&tier=standard
-      /model-index?sport=nba&tier=goblin
-      /model-index?sport=nba&tier=demon
-      etc.
-
-    This page never inspects props; it's always tiny and safe from truncation.
-    """
-    html = """
+@app.get("/upload", response_class=HTMLResponse)
+def upload_page():
+    return """
     <html>
       <head>
-        <title>Model Index Hub</title>
+        <title>Upload PrizePicks JSON</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <style>
+          :root { color-scheme: dark; }
+          body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+          }
+          main {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 1.5rem 1.25rem 2rem;
+          }
+          h1 {
+            font-size: 1.4rem;
+            margin-bottom: 0.4rem;
+          }
+          p {
+            font-size: 0.9rem;
+            color: #9ca3af;
+            margin-top: 0;
+            margin-bottom: 0.8rem;
+          }
+          label {
+            display: block;
+            margin-bottom: 0.25rem;
+            font-size: 0.85rem;
+            color: #9ca3af;
+          }
+          select {
+            width: 100%;
+            margin-bottom: 0.8rem;
+            padding: 0.55rem 0.7rem;
+            border-radius: 0.75rem;
+            border: 1px solid #4b5563;
+            background-color: #020617;
+            color: #e5e7eb;
+            font-size: 0.9rem;
+            outline: none;
+          }
+          textarea {
+            width: 100%;
+            height: 320px;
+            border-radius: 0.75rem;
+            border: 1px solid #4b5563;
+            background-color: #020617;
+            color: #e5e7eb;
+            padding: 0.75rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.82rem;
+            outline: none;
+          }
+          textarea::placeholder { color: #6b7280; }
+          button {
+            margin-top: 0.7rem;
+            padding: 0.55rem 1.1rem;
+            border-radius: 9999px;
+            border: none;
+            background: #38bdf8;
+            color: white;
+            font-size: 0.9rem;
+            cursor: pointer;
+          }
+          button:hover { filter: brightness(1.07); }
+          #status {
+            margin-top: 0.7rem;
+            font-size: 0.8rem;
+            white-space: pre-wrap;
+            color: #9ca3af;
+          }
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Upload PrizePicks JSON</h1>
+          <p>
+            Choose a sport, then paste the raw JSON from the PrizePicks API
+            (<code>{"data": [...], "included": [...]}</code>) and tap <strong>Upload</strong>.
+            This will replace any existing props for that sport on the combined board.
+          </p>
+          <label for="sport">Sport</label>
+          <select id="sport">
+            <option value="">Select a sport…</option>
+            <option value="nfl">NFL (league_id 9)</option>
+            <option value="nba">NBA (league_id 7)</option>
+            <option value="nhl">NHL (league_id 8)</option>
+            <option value="cbb">CBB (league_id 20)</option>
+            <option value="cfb">CFB (league_id 15)</option>
+            <option value="soccer">Soccer (league_id 82)</option>
+            <option value="tennis">Tennis (league_id 5)</option>
+            <option value="cs2">CS2 (league_id 265)</option>
+          </select>
+
+          <textarea id="raw" placeholder='{"data": [...], "included": [...]}'></textarea>
+          <br />
+          <button onclick="upload()">Upload</button>
+          <div id="status"></div>
+
+          <script>
+            async function upload() {
+              const status = document.getElementById('status');
+              const txt = document.getElementById('raw').value;
+              const sport = document.getElementById('sport').value;
+
+              if (!sport) {
+                status.textContent = "❌ Please select a sport.";
+                return;
+              }
+
+              let raw;
+              try {
+                raw = JSON.parse(txt);
+              } catch (e) {
+                status.textContent = "❌ Invalid JSON: " + e;
+                return;
+              }
+
+              status.textContent = "Uploading and processing…";
+              try {
+                const res = await fetch("/update-props", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ sport, raw })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                  status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
+                  return;
+                }
+                status.textContent =
+                  "✅ Uploaded " + (data.count ?? 0) + " " + (data.sport || "") +
+                  " props. Total on board: " + (data.total ?? "?") + ".";
+              } catch (e) {
+                status.textContent = "❌ Network error: " + e;
+              }
+            }
+
+            document.addEventListener("DOMContentLoaded", () => {
+              const sportSelect = document.getElementById('sport');
+              const rawTextarea = document.getElementById('raw');
+              const statusDiv = document.getElementById('status');
+              if (sportSelect && rawTextarea) {
+                sportSelect.addEventListener('change', () => {
+                  rawTextarea.value = '';
+                  if (statusDiv) statusDiv.textContent = '';
+                });
+              }
+            });
+          </script>
+        </main>
+      </body>
+    </html>
+    """
+
+# -------------------------------------------------------------------
+# Upload API
+# -------------------------------------------------------------------
+
+
+@app.post("/update-props")
+async def update_props(request: Request):
+    payload = await request.json()
+    sport_key = payload.get("sport")
+    raw = payload.get("raw")
+
+    if not sport_key or sport_key not in SPORTS:
+        raise HTTPException(status_code=400, detail="Invalid or missing 'sport' field.")
+
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Field 'raw' must be an object containing the PrizePicks JSON (with 'data' and 'included').",
+        )
+
+    try:
+        new_props = normalize_prizepicks(raw, sport_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    existing = load_file_props_raw_or_empty()
+    sport_name = SPORTS[sport_key]["name"]
+
+    # Remove any old props for this sport, then append new ones
+    remaining = [p for p in existing if (p.get("sport") or "").lower() != sport_name.lower()]
+    combined = remaining + new_props
+    save_props(combined)
+
+    total_live = len(get_current_props())
+    return {
+        "status": "ok",
+        "sport": sport_name,
+        "count": len(new_props),
+        "total": total_live,
+    }
+
+# -------------------------------------------------------------------
+# Export page (multi-sport)
+# -------------------------------------------------------------------
+
+
+@app.get("/export", response_class=HTMLResponse)
+def export_page():
+    sport_labels: List[str] = []
+    for key, cfg in SPORTS.items():
+        name = cfg["name"]
+        sport_labels.append(
+            f'<label><input type="checkbox" class="sport-checkbox" value="{key}" checked /> {name} ({key})</label>'
+        )
+    sports_html = "\n".join(sport_labels)
+
+    return """
+    <html>
+      <head>
+        <title>Export Props for ChatGPT</title>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
@@ -941,60 +1243,323 @@ def model_index_main() -> HTMLResponse:
           }
           h1 {
             font-size: 1.3rem;
-            margin-bottom: 0.75rem;
+            margin-bottom: 0.5rem;
           }
-          h2 {
-            margin-top: 1.2rem;
-            margin-bottom: 0.4rem;
-            font-size: 1.05rem;
+          p {
+            font-size: 0.9rem;
+            color: #9ca3af;
+            margin-top: 0;
+            margin-bottom: 0.7rem;
           }
-          ul {
-            list-style: none;
-            padding-left: 0;
-          }
-          li {
-            margin-bottom: 0.2rem;
-          }
-          a {
-            color: #38bdf8;
-            text-decoration: none;
+          label {
+            display: block;
+            margin-bottom: 0.25rem;
             font-size: 0.85rem;
+            color: #9ca3af;
           }
-          a:hover {
-            text-decoration: underline;
+          .row {
+            margin-bottom: 0.9rem;
           }
-          .tier-label {
+          .pill-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            font-size: 0.85rem;
+            color: #e5e7eb;
+          }
+          .pill-group label {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.3rem 0.7rem;
+            border-radius: 9999px;
+            border: 1px solid #4b5563;
+            background-color: #020617;
+            margin: 0;
+          }
+          .pill-group input[type="checkbox"] {
+            accent-color: #22c55e;
+          }
+          input[type="number"] {
+            width: 120px;
+            padding: 0.4rem 0.6rem;
+            border-radius: 0.75rem;
+            border: 1px solid #4b5563;
+            background-color: #020617;
+            color: #e5e7eb;
+            font-size: 0.9rem;
+            outline: none;
+          }
+          button {
+            margin-top: 0.7rem;
+            padding: 0.55rem 1.1rem;
+            border-radius: 9999px;
+            border: none;
+            background: #22c55e;
+            color: white;
+            font-size: 0.9rem;
+            cursor: pointer;
+          }
+          button:hover { filter: brightness(1.07); }
+          #status {
+            margin-top: 0.6rem;
             font-size: 0.8rem;
             color: #9ca3af;
-            margin-right: 0.4rem;
+            white-space: pre-wrap;
+          }
+          textarea {
+            width: 100%;
+            height: 60vh;
+            margin-top: 1rem;
+            border-radius: 0.75rem;
+            border: 1px solid #4b5563;
+            background-color: #020617;
+            color: #e5e7eb;
+            padding: 0.75rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.8rem;
           }
         </style>
       </head>
       <body>
         <main>
-          <h1>Model Index Hub</h1>
-          <p style="font-size:0.9rem;color:#9ca3af;">
-            This page links to sport/tier-specific model indexes (which then list CSV pages).
-            For prompts, you can just give the model this URL and say which sport/tier to use.
+          <h1>Export Props for ChatGPT</h1>
+          <p>
+            Tap the sports and tiers you want, optionally set a max number of props,
+            then tap <strong>Generate Export</strong>. Expired props are removed using
+            <code>game_time</code>. Format per line:
+            <code>sport,player,team,opponent,stat,line,tier,game_time</code>.
           </p>
-    """
-    # Build link sections for each sport
-    for skey, cfg in SPORTS.items():
-        sname = cfg["name"]
-        html += f"<h2>{sname}</h2>\n<ul>\n"
-        for tier in ALLOWED_TIERS:
-            url = f"/model-index?sport={skey}&tier={tier}"
-            html += f"<li><span class='tier-label'>{tier.capitalize()}:</span><a href='{url}'>{url}</a></li>\n"
-        html += "</ul>\n"
 
-    html += """
+          <div class="row">
+            <label>Sports</label>
+            <div class="pill-group" id="sports-group">
+    """ + sports_html + """
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Tiers</label>
+            <div class="pill-group">
+              <label><input type="checkbox" id="tier-goblin" value="goblin" checked /> Goblin</label>
+              <label><input type="checkbox" id="tier-standard" value="standard" checked /> Standard</label>
+              <label><input type="checkbox" id="tier-demon" value="demon" checked /> Demon</label>
+            </div>
+          </div>
+
+          <div class="row">
+            <label for="max">Max props (optional, default 300)</label>
+            <input id="max" type="number" min="1" max="5000" placeholder="300" />
+          </div>
+
+          <button type="button" onclick="generateExport()">Generate Export</button>
+          <div id="status"></div>
+          <textarea id="exportBox" readonly placeholder="Your export will appear here…"></textarea>
+
+          <script>
+            async function generateExport() {
+              const status = document.getElementById("status");
+              const box = document.getElementById("exportBox");
+
+              const selectedSports = Array.from(
+                document.querySelectorAll(".sport-checkbox")
+              )
+                .filter(cb => cb.checked)
+                .map(cb => cb.value);
+
+              if (!selectedSports.length) {
+                status.textContent = "❌ Please select at least one sport.";
+                box.value = "";
+                return;
+              }
+
+              const tiers = [];
+              if (document.getElementById("tier-goblin").checked) tiers.push("goblin");
+              if (document.getElementById("tier-standard").checked) tiers.push("standard");
+              if (document.getElementById("tier-demon").checked) tiers.push("demon");
+
+              const maxInput = document.getElementById("max").value.trim();
+              const maxVal = maxInput ? parseInt(maxInput, 10) : 300;
+
+              status.textContent = "Building export…";
+              box.value = "";
+
+              try {
+                const res = await fetch("/export-data", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    sports: selectedSports,
+                    tiers: tiers,
+                    max: maxVal
+                  })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                  status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
+                  return;
+                }
+                box.value = data.text || "";
+                status.textContent = "✅ Export ready (" + (data.count ?? 0) + " props). Long-press / Ctrl+A to copy.";
+              } catch (e) {
+                status.textContent = "❌ Network error: " + e;
+              }
+            }
+          </script>
         </main>
       </body>
     </html>
     """
-    return HTMLResponse(html)
 
 
-@app.get("/health", response_class=PlainTextResponse)
-def health() -> PlainTextResponse:
-    return PlainTextResponse("ok")
+@app.post("/export-data")
+async def export_data(request: Request):
+    payload = await request.json()
+    sports = payload.get("sports")
+    tiers = payload.get("tiers") or []
+    max_props = payload.get("max") or 300
+
+    if not isinstance(sports, list) or not sports:
+        raise HTTPException(status_code=400, detail="Field 'sports' must be a non-empty list.")
+
+    requested_keys = {str(s).lower() for s in sports}
+    valid_keys = {k for k in SPORTS.keys() if k in requested_keys}
+    if not valid_keys:
+        raise HTTPException(status_code=400, detail="No valid sports keys provided.")
+
+    tier_set = {str(t).lower() for t in tiers if t}
+    if not tier_set:
+        tier_set = ALLOWED_TIERS.copy()
+
+    try:
+        max_props = int(max_props)
+    except Exception:
+        max_props = 300
+    if max_props <= 0:
+        max_props = 300
+
+    selected_sport_names = {SPORTS[k]["name"] for k in valid_keys}
+    selected_sport_names_lower = {name.lower() for name in selected_sport_names}
+
+    all_props = get_current_props()
+
+    filtered: List[Dict[str, Any]] = []
+    for p in all_props:
+        sname = (p.get("sport") or "").lower()
+        if sname not in selected_sport_names_lower:
+            continue
+        tier_raw = str(p.get("tier", "")).lower()
+        if tier_raw not in tier_set:
+            continue
+        filtered.append(p)
+
+    filtered.sort(
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    if len(filtered) > max_props:
+        filtered = filtered[:max_props]
+
+    lines: List[str] = []
+    header = "sport,player,team,opponent,stat,line,tier,game_time"
+    lines.append(header)
+
+    for p in filtered:
+        line = ",".join(
+            [
+                _clean_csv_val(p.get("sport", "")),
+                _clean_csv_val(p.get("player", "")),
+                _clean_csv_val(p.get("team", "")),
+                _clean_csv_val(p.get("opponent", "")),
+                _clean_csv_val(p.get("stat", "")),
+                str(p.get("line", "")),
+                _clean_csv_val(p.get("tier", "")),
+                _clean_csv_val(p.get("game_time", "")),
+            ]
+        )
+        lines.append(line)
+
+    text = "\n".join(lines)
+    return {"text": text, "count": len(filtered)}
+
+# -------------------------------------------------------------------
+# JSON model-board (for your own tools; model can't see JSON)
+# -------------------------------------------------------------------
+
+
+@app.get("/model-board-json")
+def model_board_json(
+    sports: str = "all",
+    tiers: str = "",
+):
+    """
+    JSON version of the model board (for your own scripts).
+    Note: the ChatGPT browsing sandbox does NOT expose JSON bodies to me.
+    """
+    if sports.lower() == "all":
+        selected_keys = set(SPORTS.keys())
+    else:
+        requested = {s.strip().lower() for s in sports.split(",") if s.strip()}
+        selected_keys = {k for k in SPORTS.keys() if k in requested}
+        if not selected_keys:
+            raise HTTPException(status_code=400, detail="No valid sports in 'sports' param.")
+
+    selected_sport_names = {SPORTS[k]["name"] for k in selected_keys}
+    selected_sport_names_lower = {name.lower() for name in selected_sport_names}
+
+    tier_set = set()
+    if tiers:
+        for t in tiers.split("+"):
+            t = t.strip().lower()
+            if not t:
+                continue
+            if t not in ALLOWED_TIERS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
+                )
+            tier_set.add(t)
+    if not tier_set:
+        tier_set = ALLOWED_TIERS.copy()
+
+    all_props = get_current_props()
+    filtered: List[Dict[str, Any]] = []
+
+    for p in all_props:
+        sname = (p.get("sport") or "").lower()
+        if sname not in selected_sport_names_lower:
+            continue
+        tier_raw = str(p.get("tier", "")).lower()
+        if tier_raw not in tier_set:
+            continue
+        filtered.append(p)
+
+    filtered.sort(
+        key=lambda p: (
+            (p.get("sport") or ""),
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    result: List[Dict[str, Any]] = []
+    for p in filtered:
+        result.append(
+            {
+                "sport": p.get("sport"),
+                "player": p.get("player"),
+                "team": p.get("team"),
+                "opponent": p.get("opponent"),
+                "stat": p.get("stat"),
+                "market": p.get("market"),
+                "line": p.get("line"),
+                "tier": p.get("tier"),
+                "game_time": p.get("game_time"),
+            }
+        )
+
+    return JSONResponse(result)
