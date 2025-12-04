@@ -33,6 +33,18 @@ SPORTS: Dict[str, Dict[str, Any]] = {
 
 ALLOWED_TIERS = {"standard", "goblin", "demon"}
 
+# Underdog sport_id → our sport key
+UNDERDOG_SPORT_MAP: Dict[str, str] = {
+    "NFL": "nfl",
+    "NBA": "nba",
+    "NHL": "nhl",
+    "CBB": "cbb",
+    "CFB": "cfb",
+    "FIFA": "soccer",  # soccer on UD
+    "TENNIS": "tennis",
+    "CS": "cs2",       # cs2 on UD
+}
+
 # -------------------------------------------------------------------
 # Helpers: load / save props
 # -------------------------------------------------------------------
@@ -278,7 +290,11 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
                 except Exception:
                     line = None
 
-            start_time = game_info.get("start_time") or attrs.get("start_time") or attrs.get("start_at")
+            start_time = (
+                game_info.get("start_time")
+                or attrs.get("start_time")
+                or attrs.get("start_at")
+            )
 
             tier = _extract_tier_from_attrs(attrs)
 
@@ -288,7 +304,7 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
             props.append(
                 {
                     "id": pid,
-                    "source": "uploaded",
+                    "source": "prizepicks",
                     "board": sport_name,
                     "league": league,
                     "sport": sport_name,
@@ -310,12 +326,12 @@ def normalize_prizepicks(raw: Dict[str, Any], sport_key: str) -> List[Dict[str, 
     return props
 
 # -------------------------------------------------------------------
-# Small utils for CSV / HTML cleanup
+# Small util for CSV cleanup
 # -------------------------------------------------------------------
 
 
 def _clean_csv_val(v: Any) -> str:
-    """Pretty CSV value (allow spaces, used for manual exports)."""
+    """Make sure CSV values don't break the row."""
     return str(v).replace(",", " ").replace("\n", " ").strip()
 
 
@@ -323,43 +339,164 @@ def _model_csv_val(v: Any) -> str:
     """
     Ultra-compact value for model-board CSV pages:
     - remove commas/newlines
-    - collapse spaces into underscores so each field has no internal whitespace
+    - collapse spaces into underscores so each row behaves like one token
     """
     s = str(v).replace(",", " ").replace("\n", " ").strip()
     parts = s.split()
     return "_".join(parts)
 
 
-def _encode_prop_as_word_from_csv_row(row: Dict[str, str]) -> str:
-    """
-    Turn a CSV row dict into a single no-space string for HTML view pages.
+def _map_underdog_sport_id(sport_id: Any) -> Optional[str]:
+    sid = str(sport_id or "").strip().upper()
+    if not sid:
+        return None
+    return UNDERDOG_SPORT_MAP.get(sid)
 
-    Example:
-      sport=NBA, player=LeBron James, team=LAL, ...
-    becomes:
-      NBA|LeBron_James|LAL|PHX|PTS|26.5|standard|2025-12-02T00:00:00Z
-    """
-    def clean(s: Any) -> str:
-        # base string
-        val = str(s or "")
-        # avoid breaking our pipe format
-        val = val.replace("|", "/").replace("\n", " ").strip()
-        # collapse all whitespace to underscores so there are NO spaces
-        parts = val.split()
-        return "_".join(parts)
 
-    return "|".join(
-        [
-            clean(row.get("sport", "")),
-            clean(row.get("player", "")),
-            clean(row.get("team", "")),
-            clean(row.get("opponent", "")),
-            clean(row.get("stat", "")),
-            clean(row.get("line", "")),
-            clean(row.get("tier", "")),
-            clean(row.get("game_time", "")),
-        ]
-    )
+def normalize_underdog(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Normalize an Underdog Fantasy JSON blob into our unified props format.
+
+    - sport / board inferred from games[*].sport_id via UNDERDOG_SPORT_MAP
+    - american_over / american_under set from options[].american_price when present
+    """
+    appearances_list = raw.get("appearances", []) or []
+    games_list = raw.get("games", []) or []
+    lines_list = raw.get("over_under_lines", []) or []
+
+    appearances: Dict[Any, Dict[str, Any]] = {}
+    for a in appearances_list:
+        aid = a.get("id")
+        if aid is not None:
+            appearances[aid] = a
+
+    games: Dict[Any, Dict[str, Any]] = {}
+    for g in games_list:
+        gid = g.get("id")
+        if gid is not None:
+            games[gid] = g
+
+    props: List[Dict[str, Any]] = []
+
+    for line_obj in lines_list:
+        try:
+            ou = line_obj.get("over_under") or {}
+            app_stat = ou.get("appearance_stat") or {}
+            appearance_id = app_stat.get("appearance_id")
+            if not appearance_id:
+                continue
+
+            appearance = appearances.get(appearance_id) or {}
+            match_id = appearance.get("match_id")
+            game = games.get(match_id) or {}
+
+            sport_id = game.get("sport_id")
+            sport_key = _map_underdog_sport_id(sport_id)
+            if sport_key and sport_key in SPORTS:
+                sport_name = SPORTS[sport_key]["name"]
+            else:
+                # Unknown sport: just keep the raw sport_id as the name
+                sport_name = str(sport_id or "Unknown")
+
+            game_time = game.get("scheduled_at") or None
+
+            # Parse teams from game title, e.g. "CIN @ XAV"
+            title = game.get("title") or game.get("short_title") or ""
+            away_abbr = ""
+            home_abbr = ""
+            if "@" in title:
+                parts = title.split("@")
+                if len(parts) == 2:
+                    away_abbr = parts[0].strip()
+                    home_abbr = parts[1].strip()
+
+            team = ""
+            opponent = ""
+
+            team_id = appearance.get("team_id")
+            away_id = game.get("away_team_id")
+            home_id = game.get("home_team_id")
+            if team_id and (away_id or home_id):
+                if team_id == away_id:
+                    team = away_abbr or "Away"
+                    opponent = home_abbr or "Home"
+                elif team_id == home_id:
+                    team = home_abbr or "Home"
+                    opponent = away_abbr or "Away"
+
+            options = line_obj.get("options") or []
+            player_name = ""
+            if options:
+                # Usually "Day Day Thomas"
+                player_name = (options[0].get("selection_header") or "").strip()
+
+            if not player_name:
+                title_text = ou.get("title") or ""
+                # crude fallback: "Name Something O/U"
+                if " O/U" in title_text:
+                    before = title_text.split(" O/U")[0]
+                    player_name = before.strip()
+
+            if not player_name:
+                continue
+
+            stat_display = (
+                app_stat.get("display_stat")
+                or app_stat.get("stat")
+                or ""
+            )
+            if not stat_display:
+                continue
+
+            stat_value = line_obj.get("stat_value")
+            try:
+                line_val = float(stat_value)
+            except Exception:
+                continue
+
+            american_over: Optional[str] = None
+            american_under: Optional[str] = None
+            for opt in options:
+                choice = (opt.get("choice") or "").lower()
+                american = opt.get("american_price")
+                if not american:
+                    continue
+                if choice in ("higher", "over"):
+                    american_over = american
+                elif choice in ("lower", "under"):
+                    american_under = american
+
+            tier = "standard"  # Underdog doesn't have tiers, treat as standard
+
+            market = str(app_stat.get("stat") or stat_display).lower().replace(" ", "_")
+
+            prop: Dict[str, Any] = {
+                "id": f"ud_{line_obj.get('id')}",
+                "source": "underdog",
+                "board": sport_name,
+                "league": sport_name,
+                "sport": sport_name,
+                "player": player_name,
+                "team": team,
+                "opponent": opponent,
+                "stat": stat_display,
+                "market": market,
+                "line": line_val,
+                "game_time": game_time,
+                "projection_type": "main",
+                "tier": tier,
+            }
+            if american_over is not None:
+                prop["american_over"] = american_over
+            if american_under is not None:
+                prop["american_under"] = american_under
+
+            props.append(prop)
+        except Exception:
+            # Skip malformed line gracefully
+            continue
+
+    return props
 
 # -------------------------------------------------------------------
 # Health
@@ -379,6 +516,7 @@ def health():
 def board_view():
     """
     Main odds board UI. Data is fetched from /props.json (which uses get_current_props()).
+    Includes American odds (from Underdog) when available.
     """
     return """
     <html>
@@ -546,12 +684,13 @@ def board_view():
                   <th>Stat</th>
                   <th>Line</th>
                   <th>Tier</th>
+                  <th>Odds (UD)</th>
                   <th>Game Time</th>
                   <th>Sport</th>
                 </tr>
               </thead>
               <tbody id="props-body">
-                <tr><td colspan="8">Loading…</td></tr>
+                <tr><td colspan="9">Loading…</td></tr>
               </tbody>
             </table>
           </div>
@@ -629,7 +768,7 @@ def board_view():
             if (!props.length) {
               const tr = document.createElement("tr");
               const td = document.createElement("td");
-              td.colSpan = 8;
+              td.colSpan = 9;
               td.textContent = "No props match the current filters or nothing has been uploaded yet.";
               tr.appendChild(td);
               tbody.appendChild(tr);
@@ -677,6 +816,17 @@ def board_view():
                 tdTier.appendChild(pillTier);
               }
               tr.appendChild(tdTier);
+
+              const tdOdds = document.createElement("td");
+              const o = p.american_over || "";
+              const u = p.american_under || "";
+              if (o || u) {
+                let txt = "";
+                if (o) txt += "O " + o;
+                if (u) txt += (txt ? " / " : "") + "U " + u;
+                tdOdds.textContent = txt;
+              }
+              tr.appendChild(tdOdds);
 
               const tdTime = document.createElement("td");
               if (p.game_time) {
@@ -870,114 +1020,12 @@ def _build_model_page_text(
 
     return "\n".join(lines)
 
-# -------------------------------------------------------------------
-# HTML view for model-board pages (1 word per prop)
-# -------------------------------------------------------------------
-
-
-@app.get("/model-board-view/{sport}/page/{page}", response_class=HTMLResponse)
-def model_board_view(
-    sport: str,
-    page: int,
-    page_size: int = 160,  # ~160 props/page to stay under ~200 "word" snippet
-    tiers: str = "",
-):
-    """
-    HTML view of a model-board page, where each prop is a single 'word' line:
-    sport|player|team|opponent|stat|line|tier|game_time
-
-    This is the endpoint ChatGPT should actually open when searching props.
-    """
-    # Reuse the CSV builder (same filters & sorting)
-    csv_text = _build_model_page_text(
-        sport_key=sport,
-        tiers_str=tiers or None,
-        page=page,
-        page_size=page_size,
-    )
-
-    # Parse CSV into rows
-    lines = [ln for ln in csv_text.splitlines() if ln.strip()]
-    if not lines:
-        rows: List[Dict[str, str]] = []
-    else:
-        header = [h.strip() for h in lines[0].split(",")]
-        rows = []
-        for line in lines[1:]:
-            cols = line.split(",")
-            row: Dict[str, str] = {}
-            for idx, h in enumerate(header):
-                if idx < len(cols):
-                    row[h] = cols[idx]
-                else:
-                    row[h] = ""
-            rows.append(row)
-
-    html = """
-    <html>
-      <head>
-        <title>Model Board View</title>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <style>
-          :root { color-scheme: dark; }
-          body {
-            margin: 0;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #020617;
-            color: #e5e7eb;
-          }
-          main {
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 1.0rem 1.0rem 1.5rem;
-          }
-          h1 {
-            font-size: 1.0rem;
-            margin-bottom: 0.5rem;
-          }
-          p {
-            font-size: 0.8rem;
-            color: #9ca3af;
-            margin-top: 0;
-            margin-bottom: 0.5rem;
-          }
-          pre {
-            font-size: 0.75rem;
-            line-height: 1.25;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-          }
-        </style>
-      </head>
-      <body>
-        <main>
-          <h1>Model Board View</h1>
-          <p>Each line below is one prop token: sport|player|team|opponent|stat|line|tier|game_time</p>
-          <pre>
-    """
-
-    for row in rows:
-        encoded = _encode_prop_as_word_from_csv_row(row)
-        html += encoded + "\n"
-
-    html += """</pre>
-        </main>
-      </body>
-    </html>
-    """
-    return HTMLResponse(html)
-
-# -------------------------------------------------------------------
-# Raw CSV model board endpoints
-# -------------------------------------------------------------------
-
 
 @app.get("/model-board", response_class=PlainTextResponse)
 def model_board():
     """
     Full board as CSV in one page (debugging).
-    For the model, use /model-index-main → /model-index → /model-board-view/... .
+    For the model, use /model-board-view HTML pages or /model-board-json.
     """
     text = _build_model_page_text("all", None, page=1, page_size=100000)
     return PlainTextResponse(text)
@@ -987,7 +1035,7 @@ def model_board():
 def model_board_paged(
     sport: str,
     page: int,
-    page_size: int = 160,
+    page_size: int = 150,
     tiers: str = "",
 ):
     """
@@ -996,7 +1044,7 @@ def model_board_paged(
     Examples:
       /model-board/nba/page/1
       /model-board/nba/page/1?tiers=standard
-      /model-board/nba/page/2?tiers=standard+goblin&page_size=160
+      /model-board/nba/page/2?tiers=standard+goblin&page_size=150
     """
     text = _build_model_page_text(
         sport_key=sport,
@@ -1007,7 +1055,277 @@ def model_board_paged(
     return PlainTextResponse(text)
 
 # -------------------------------------------------------------------
-# Model index pages (hub + filtered index)
+# HTML model-board view (what the model will actually read)
+# -------------------------------------------------------------------
+
+
+@app.get("/model-board-view/{sport}/page/{page}", response_class=HTMLResponse)
+def model_board_view(
+    sport: str,
+    page: int,
+    page_size: int = 80,
+    tiers: str = "",
+):
+    """
+    HTML table view of a single sport/tier slice, paged, with American odds if available.
+    No CSV button; this is the primary view used via /model-index.
+    """
+    sport_key = sport.lower()
+    if sport_key not in SPORTS:
+        raise HTTPException(status_code=404, detail="Unknown sport key")
+
+    # Parse tiers
+    tier_set: Optional[set] = None
+    if tiers:
+        parts = [t.strip().lower() for t in tiers.split("+") if t.strip()]
+        tmp = set()
+        for t in parts:
+            if t not in ALLOWED_TIERS:
+                raise HTTPException(status_code=400, detail=f"Invalid tier '{t}'")
+            tmp.add(t)
+        if not tmp:
+            raise HTTPException(status_code=400, detail="No valid tiers")
+        tier_set = tmp
+
+    all_props = get_current_props()
+    sport_name = SPORTS[sport_key]["name"]
+
+    filtered = [
+        p for p in all_props
+        if (p.get("sport") or "").lower() == sport_name.lower()
+    ]
+    if tier_set is not None:
+        filtered = [
+            p for p in filtered
+            if str(p.get("tier", "")).lower() in tier_set
+        ]
+
+    filtered.sort(
+        key=lambda p: (
+            (p.get("game_time") or ""),
+            (p.get("player") or ""),
+        )
+    )
+
+    total = len(filtered)
+    if total == 0:
+        props_page: List[Dict[str, Any]] = []
+        total_pages = 1
+    else:
+        if page < 1:
+            raise HTTPException(status_code=400, detail="Page must be >= 1")
+        total_pages = (total + page_size - 1) // page_size
+        if page > total_pages:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Page {page} out of range (total_pages={total_pages})",
+            )
+        start = (page - 1) * page_size
+        end = start + page_size
+        props_page = filtered[start:end]
+
+    tier_label = tiers or "all tiers"
+
+    html_head = f"""
+    <html>
+      <head>
+        <title>Model Board · {sport_name} · page {page}</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          :root {{ color-scheme: dark; }}
+          body {{
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #020617;
+            color: #e5e7eb;
+          }}
+          main {{
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 1.2rem 1.25rem 2rem;
+          }}
+          a {{
+            color: #38bdf8;
+            text-decoration: none;
+            font-size: 0.85rem;
+          }}
+          a:hover {{
+            text-decoration: underline;
+          }}
+          h1 {{
+            font-size: 1.1rem;
+            margin-bottom: 0.4rem;
+          }}
+          p {{
+            font-size: 0.9rem;
+            color: #9ca3af;
+            margin-top: 0;
+            margin-bottom: 0.7rem;
+          }}
+          .meta {{
+            font-size: 0.8rem;
+            color: #9ca3af;
+            margin-bottom: 0.9rem;
+          }}
+          .table-wrapper {{
+            border-radius: 0.75rem;
+            border: 1px solid #1f2937;
+            overflow: hidden;
+            background: #020617;
+          }}
+          table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+          }}
+          thead {{
+            background: #111827;
+          }}
+          thead th {{
+            text-align: left;
+            padding: 0.5rem 0.6rem;
+            white-space: nowrap;
+            font-weight: 500;
+            color: #e5e7eb;
+            border-bottom: 1px solid #1f2937;
+          }}
+          tbody td {{
+            padding: 0.45rem 0.6rem;
+            border-bottom: 1px solid #111827;
+          }}
+          tbody tr:nth-child(even) {{ background-color: #020617; }}
+          tbody tr:nth-child(odd) {{ background-color: #020617; }}
+          tbody tr:hover {{ background-color: #111827; }}
+          .pill {{
+            display: inline-flex;
+            align-items: center;
+            padding: 0.15rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.7rem;
+            border: 1px solid #4b5563;
+            color: #e5e7eb;
+          }}
+          .pill.tier-goblin {{
+            border-color: #fbbf24;
+            color: #fbbf24;
+          }}
+          .pill.tier-demon {{
+            border-color: #f97373;
+            color: #fecaca;
+          }}
+          .pill.time {{
+            border-color: #facc15;
+            color: #facc15;
+          }}
+          .pill.league {{
+            border-color: #22c55e;
+            color: #bbf7d0;
+          }}
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>{sport_name} · {tier_label} · page {page} / {total_pages}</h1>
+          <p>
+            HTML model-board view for this sport/tier slice. Use links from
+            <a href="/model-index-main">/model-index-main</a> to navigate.
+          </p>
+          <div class="meta">
+            Total props in this slice: {total}. Showing page {page} of {total_pages}.
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Team</th>
+                  <th>Opponent</th>
+                  <th>Stat</th>
+                  <th>Line</th>
+                  <th>Tier</th>
+                  <th>Odds (UD)</th>
+                  <th>Game Time</th>
+                  <th>Sport</th>
+                </tr>
+              </thead>
+              <tbody>
+    """
+
+    if not props_page:
+        html_body = """
+                <tr>
+                  <td colspan="9">No props found for this page.</td>
+                </tr>
+        """
+    else:
+        rows: List[str] = []
+        for p in props_page:
+            player = (p.get("player") or "").replace("<", "&lt;").replace(">", "&gt;")
+            team = (p.get("team") or "").replace("<", "&lt;").replace(">", "&gt;")
+            opp = (p.get("opponent") or "").replace("<", "&lt;").replace(">", "&gt;")
+            stat = (p.get("stat") or "").replace("<", "&lt;").replace(">", "&gt;")
+            line_val = p.get("line", "")
+            tier_raw = str(p.get("tier", "")).lower()
+            game_time = p.get("game_time") or ""
+            american_over = p.get("american_over") or ""
+            american_under = p.get("american_under") or ""
+            odds_txt = ""
+            if american_over or american_under:
+                if american_over:
+                    odds_txt += f"O {american_over}"
+                if american_under:
+                    odds_txt += (" / " if odds_txt else "") + f"U {american_under}"
+            sport_label = (p.get("sport") or "").replace("<", "&lt;").replace(">", "&gt;")
+
+            # tier pill
+            if tier_raw == "goblin":
+                tier_html = '<span class="pill tier-goblin">Goblin</span>'
+            elif tier_raw == "demon":
+                tier_html = '<span class="pill tier-demon">Demon</span>'
+            elif tier_raw:
+                tier_html = f'<span class="pill">{tier_raw}</span>'
+            else:
+                tier_html = ""
+
+            # time pill
+            time_html = ""
+            if game_time:
+                safe_time = game_time.replace("<", "&lt;").replace(">", "&gt;")
+                time_html = f'<span class="pill time">{safe_time}</span>'
+
+            league_html = f'<span class="pill league">{sport_label}</span>'
+
+            row = f"""
+                <tr>
+                  <td>{player}</td>
+                  <td>{team}</td>
+                  <td>{opp}</td>
+                  <td>{stat}</td>
+                  <td>{line_val}</td>
+                  <td>{tier_html}</td>
+                  <td>{odds_txt}</td>
+                  <td>{time_html}</td>
+                  <td>{league_html}</td>
+                </tr>
+            """
+            rows.append(row)
+
+        html_body = "\n".join(rows)
+
+    html_tail = """
+              </tbody>
+            </table>
+          </div>
+        </main>
+      </body>
+    </html>
+    """
+
+    return HTMLResponse(html_head + html_body + html_tail)
+
+# -------------------------------------------------------------------
+# Main model index hub (small HTML → links to filtered /model-index)
 # -------------------------------------------------------------------
 
 
@@ -1112,13 +1430,13 @@ def model_index_main():
           <p>
             This page lists the available sport/tier categories. Each link goes to a
             <code>/model-index?sport=...&amp;tier=...</code> page, which in turn lists
-            the paged CSV/HTML endpoints like
+            paged HTML endpoints like
             <code>/model-board-view/nba/page/1?tiers=standard</code>.
           </p>
     """
 
     # For each sport that actually has live props, show:
-    # - "All tiers" link (e.g. /model-index?sport=nba)
+    # - "All tiers" link
     # - per-tier links if they have props (standard / goblin / demon)
     for skey, cfg in SPORTS.items():
         total = total_per_sport.get(skey, 0)
@@ -1151,6 +1469,10 @@ def model_index_main():
     """
     return HTMLResponse(html)
 
+# -------------------------------------------------------------------
+# Model index page (HTML with links to HTML model-board pages)
+# -------------------------------------------------------------------
+
 
 @app.get("/model-index", response_class=HTMLResponse)
 def model_index(sport: str = "", tier: str = ""):
@@ -1163,7 +1485,7 @@ def model_index(sport: str = "", tier: str = ""):
       - tier:  optional tier filter ("standard","goblin","demon").
                If omitted → all tiers.
 
-    Typical usage (via /model-index-main):
+    Typical usage (from /model-index-main):
       /model-index?sport=nba
       /model-index?sport=nba&tier=standard
     """
@@ -1204,8 +1526,7 @@ def model_index(sport: str = "", tier: str = ""):
         k = (skey, t)
         counts[k] = counts.get(k, 0) + 1
 
-    # IMPORTANT: keep this in sync with your HTML page size
-    PAGE_SIZE = 80  # or 150 if you didn't change the page_size default
+    PAGE_SIZE = 80  # keep in sync with /model-board-view page_size default
 
     html = """
     <html>
@@ -1306,7 +1627,6 @@ def model_index(sport: str = "", tier: str = ""):
             html += f"<h3>{t.capitalize()} <span class='pill'>{count} props · {pages} page(s)</span></h3>\n"
             html += "<ul>\n"
             for page in range(1, pages + 1):
-                # 🔹 HTML-only: no CSV link here
                 url = f"/model-board-view/{skey}/page/{page}?tiers={t}"
                 html += f"<li><a href='{url}'>{sname} · {t} · page {page}</a></li>\n"
             html += "</ul>\n"
@@ -1318,49 +1638,59 @@ def model_index(sport: str = "", tier: str = ""):
     """
     return HTMLResponse(html)
 
-
 # -------------------------------------------------------------------
-# Upload page
+# Upload page (PrizePicks per-sport + Underdog extras)
 # -------------------------------------------------------------------
 
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page():
-    return """
+    sport_labels: List[str] = []
+    for key, cfg in SPORTS.items():
+        name = cfg["name"]
+        sport_labels.append(f'<option value="{key}">{name} ({key})</option>')
+    sport_options = "\n".join(sport_labels)
+
+    return f"""
     <html>
       <head>
-        <title>Upload PrizePicks JSON</title>
+        <title>Upload JSON</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <style>
-          :root { color-scheme: dark; }
-          body {
+          :root {{ color-scheme: dark; }}
+          body {{
             margin: 0;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             background: #020617;
             color: #e5e7eb;
-          }
-          main {
-            max-width: 800px;
+          }}
+          main {{
+            max-width: 900px;
             margin: 0 auto;
             padding: 1.5rem 1.25rem 2rem;
-          }
-          h1 {
+          }}
+          h1 {{
             font-size: 1.4rem;
             margin-bottom: 0.4rem;
-          }
-          p {
+          }}
+          h2 {{
+            font-size: 1.1rem;
+            margin-top: 1.3rem;
+            margin-bottom: 0.4rem;
+          }}
+          p {{
             font-size: 0.9rem;
             color: #9ca3af;
             margin-top: 0;
             margin-bottom: 0.8rem;
-          }
-          label {
+          }}
+          label {{
             display: block;
             margin-bottom: 0.25rem;
             font-size: 0.85rem;
             color: #9ca3af;
-          }
-          select {
+          }}
+          select {{
             width: 100%;
             margin-bottom: 0.8rem;
             padding: 0.55rem 0.7rem;
@@ -1370,10 +1700,10 @@ def upload_page():
             color: #e5e7eb;
             font-size: 0.9rem;
             outline: none;
-          }
-          textarea {
+          }}
+          textarea {{
             width: 100%;
-            height: 320px;
+            height: 260px;
             border-radius: 0.75rem;
             border: 1px solid #4b5563;
             background-color: #020617;
@@ -1382,9 +1712,9 @@ def upload_page():
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
             font-size: 0.82rem;
             outline: none;
-          }
-          textarea::placeholder { color: #6b7280; }
-          button {
+          }}
+          textarea::placeholder {{ color: #6b7280; }}
+          button {{
             margin-top: 0.7rem;
             padding: 0.55rem 1.1rem;
             border-radius: 9999px;
@@ -1393,92 +1723,143 @@ def upload_page():
             color: white;
             font-size: 0.9rem;
             cursor: pointer;
-          }
-          button:hover { filter: brightness(1.07); }
-          #status {
+          }}
+          button:hover {{ filter: brightness(1.07); }}
+          #status-pp, #status-ud {{
             margin-top: 0.7rem;
             font-size: 0.8rem;
             white-space: pre-wrap;
             color: #9ca3af;
-          }
+          }}
+          hr {{
+            border: none;
+            border-top: 1px solid #111827;
+            margin: 1.5rem 0;
+          }}
         </style>
       </head>
       <body>
         <main>
-          <h1>Upload PrizePicks JSON</h1>
+          <h1>Upload JSON</h1>
+
+          <h2>PrizePicks · per sport</h2>
           <p>
             Choose a sport, then paste the raw JSON from the PrizePicks API
-            (<code>{"data": [...], "included": [...]}</code>) and tap <strong>Upload</strong>.
+            (<code>{{"data": [...], "included": [...]}}</code>) and tap <strong>Upload</strong>.
             This will replace any existing props for that sport on the combined board.
           </p>
           <label for="sport">Sport</label>
           <select id="sport">
             <option value="">Select a sport…</option>
-            <option value="nfl">NFL (league_id 9)</option>
-            <option value="nba">NBA (league_id 7)</option>
-            <option value="nhl">NHL (league_id 8)</option>
-            <option value="cbb">CBB (league_id 20)</option>
-            <option value="cfb">CFB (league_id 15)</option>
-            <option value="soccer">Soccer (league_id 82)</option>
-            <option value="tennis">Tennis (league_id 5)</option>
-            <option value="cs2">CS2 (league_id 265)</option>
+            {sport_options}
           </select>
 
-          <textarea id="raw" placeholder='{"data": [...], "included": [...]}'></textarea>
+          <textarea id="raw-pp" placeholder='{{"data": [...], "included": [...]}}'></textarea>
           <br />
-          <button onclick="upload()">Upload</button>
-          <div id="status"></div>
+          <button onclick="uploadPP()">Upload PrizePicks</button>
+          <div id="status-pp"></div>
+
+          <hr />
+
+          <h2>Extras · Underdog Fantasy</h2>
+          <p>
+            Paste an Underdog Fantasy JSON response (with <code>games</code>,
+            <code>appearances</code> and <code>over_under_lines</code>).
+            The sport is auto-detected from <code>games[*].sport_id</code>
+            (e.g. <code>CBB</code>, <code>NFL</code>, <code>FIFA</code>, <code>CS</code>).
+            Matching existing props (same sport, player, stat, line) will be enriched
+            with American odds; unmatched ones are added as new props.
+          </p>
+
+          <textarea id="raw-ud" placeholder='{{"games": [...], "appearances": [...], "over_under_lines": [...]}}'></textarea>
+          <br />
+          <button onclick="uploadUD()">Upload Underdog</button>
+          <div id="status-ud"></div>
 
           <script>
-            async function upload() {
-              const status = document.getElementById('status');
-              const txt = document.getElementById('raw').value;
+            async function uploadPP() {{
+              const status = document.getElementById('status-pp');
+              const txt = document.getElementById('raw-pp').value;
               const sport = document.getElementById('sport').value;
 
-              if (!sport) {
+              if (!sport) {{
                 status.textContent = "❌ Please select a sport.";
                 return;
-              }
+              }}
 
               let raw;
-              try {
+              try {{
                 raw = JSON.parse(txt);
-              } catch (e) {
+              }} catch (e) {{
                 status.textContent = "❌ Invalid JSON: " + e;
                 return;
-              }
+              }}
 
-              status.textContent = "Uploading and processing…";
-              try {
-                const res = await fetch("/update-props", {
+              status.textContent = "Uploading and processing PrizePicks…";
+              try {{
+                const res = await fetch("/update-props", {{
                   method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ sport, raw })
-                });
+                  headers: {{ "Content-Type": "application/json" }},
+                  body: JSON.stringify({{ sport, raw }})
+                }});
                 const data = await res.json();
-                if (!res.ok) {
+                if (!res.ok) {{
                   status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
                   return;
-                }
+                }}
                 status.textContent =
                   "✅ Uploaded " + (data.count ?? 0) + " " + (data.sport || "") +
                   " props. Total on board: " + (data.total ?? "?") + ".";
-              } catch (e) {
+              }} catch (e) {{
                 status.textContent = "❌ Network error: " + e;
-              }
-            }
+              }}
+            }}
 
-            document.addEventListener("DOMContentLoaded", () => {
+            async function uploadUD() {{
+              const status = document.getElementById('status-ud');
+              const txt = document.getElementById('raw-ud').value;
+
+              let raw;
+              try {{
+                raw = JSON.parse(txt);
+              }} catch (e) {{
+                status.textContent = "❌ Invalid JSON: " + e;
+                return;
+              }}
+
+              status.textContent = "Uploading and processing Underdog…";
+              try {{
+                const res = await fetch("/update-props-underdog", {{
+                  method: "POST",
+                  headers: {{ "Content-Type": "application/json" }},
+                  body: JSON.stringify({{ raw }})
+                }});
+                const data = await res.json();
+                if (!res.ok) {{
+                  status.textContent = "❌ Error: " + (data.detail || JSON.stringify(data));
+                  return;
+                }}
+                status.textContent =
+                  "✅ Processed " + (data.count ?? 0) + " Underdog lines. " +
+                  "Matched existing: " + (data.updated_existing ?? 0) +
+                  ", inserted new: " + (data.inserted_new ?? 0) +
+                  ". Total on board: " + (data.total ?? "?") + ".";
+              }} catch (e) {{
+                status.textContent = "❌ Network error: " + e;
+              }}
+            }}
+
+            document.addEventListener("DOMContentLoaded", () => {{
               const sportSelect = document.getElementById('sport');
-              const rawTextarea = document.getElementById('raw');
-              const statusDiv = document.getElementById('status');
-              if (sportSelect && rawTextarea) {
-                sportSelect.addEventListener('change', () => {
-                  rawTextarea.value = '';
-                  if (statusDiv) statusDiv.textContent = '';
-                });
-              }
-            });
+              const ppTextarea = document.getElementById('raw-pp');
+              const statusPP = document.getElementById('status-pp');
+              if (sportSelect && ppTextarea) {{
+                sportSelect.addEventListener('change', () => {{
+                  ppTextarea.value = '';
+                  if (statusPP) statusPP.textContent = '';
+                }});
+              }}
+            }});
           </script>
         </main>
       </body>
@@ -1486,12 +1867,16 @@ def upload_page():
     """
 
 # -------------------------------------------------------------------
-# Upload API
+# Upload APIs
 # -------------------------------------------------------------------
 
 
 @app.post("/update-props")
 async def update_props(request: Request):
+    """
+    PrizePicks upload:
+      { "sport": "nba", "raw": { "data": [...], "included": [...] } }
+    """
     payload = await request.json()
     sport_key = payload.get("sport")
     raw = payload.get("raw")
@@ -1523,6 +1908,88 @@ async def update_props(request: Request):
         "status": "ok",
         "sport": sport_name,
         "count": len(new_props),
+        "total": total_live,
+    }
+
+
+@app.post("/update-props-underdog")
+async def update_props_underdog(request: Request):
+    """
+    Underdog upload:
+      { "raw": { "games": [...], "appearances": [...], "over_under_lines": [...] } }
+
+    - Auto-detects sport via games[*].sport_id
+    - For each normalized UD prop, attempts to match existing props
+      (same sport, player, stat, line) and enriches them with
+      american_over / american_under.
+    - Unmatched props are appended as new entries.
+    """
+    payload = await request.json()
+    raw = payload.get("raw")
+
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Field 'raw' must be an object containing the Underdog JSON.",
+        )
+
+    new_props = normalize_underdog(raw)
+    existing = load_file_props_raw_or_empty()
+
+    def canonical_key(p: Dict[str, Any]) -> Optional[tuple]:
+        sport = str(p.get("sport") or "").strip().lower()
+        player = str(p.get("player") or "").strip().lower()
+        stat = str(p.get("stat") or "").strip().lower()
+        line = p.get("line")
+        try:
+            line_val = float(line)
+        except Exception:
+            return None
+        if not (sport and player and stat):
+            return None
+        return (sport, player, stat, line_val)
+
+    index: Dict[tuple, List[int]] = {}
+    for i, p in enumerate(existing):
+        key = canonical_key(p)
+        if key is None:
+            continue
+        index.setdefault(key, []).append(i)
+
+    updated_matches = 0
+    inserted = 0
+
+    for ud in new_props:
+        key = canonical_key(ud)
+        if key is None:
+            existing.append(ud)
+            inserted += 1
+            continue
+
+        matches = index.get(key)
+        if matches:
+            for idx in matches:
+                p = existing[idx]
+                if "american_over" in ud:
+                    p["american_over"] = ud["american_over"]
+                if "american_under" in ud:
+                    p["american_under"] = ud["american_under"]
+                # keep existing source; just augment odds
+            updated_matches += 1
+        else:
+            existing.append(ud)
+            idx_new = len(existing) - 1
+            index.setdefault(key, []).append(idx_new)
+            inserted += 1
+
+    save_props(existing)
+    total_live = len(get_current_props())
+
+    return {
+        "status": "ok",
+        "count": len(new_props),
+        "updated_existing": updated_matches,
+        "inserted_new": inserted,
         "total": total_live,
     }
 
@@ -1806,7 +2273,7 @@ async def export_data(request: Request):
     return {"text": text, "count": len(filtered)}
 
 # -------------------------------------------------------------------
-# JSON model-board (for your own tools; model can't see JSON bodies)
+# JSON model-board (for your own tools; model can't see JSON directly)
 # -------------------------------------------------------------------
 
 
@@ -1817,7 +2284,8 @@ def model_board_json(
 ):
     """
     JSON version of the model board (for your own scripts).
-    Note: the ChatGPT browsing sandbox does NOT expose JSON bodies to me.
+    Note: the ChatGPT browsing sandbox does NOT expose JSON bodies directly,
+    but this is still useful for your local tools.
     """
     if sports.lower() == "all":
         selected_keys = set(SPORTS.keys())
@@ -1878,6 +2346,9 @@ def model_board_json(
                 "line": p.get("line"),
                 "tier": p.get("tier"),
                 "game_time": p.get("game_time"),
+                # include odds if present
+                "american_over": p.get("american_over"),
+                "american_under": p.get("american_under"),
             }
         )
 
