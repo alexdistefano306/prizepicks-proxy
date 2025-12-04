@@ -351,32 +351,32 @@ def normalize_prizepicks(
             if not player or line_val is None or not stat:
                 continue
 
-                        props.append(
-    {
-        "id": pid,
-        "source": "prizepicks",
-        "board": sport_name,
-        "league": league,
-        "sport": sport_name,
-        "sport_slug": sport_slug,
-        "player": player,
-        "team": team,
-        "opponent": opponent,
-        "stat": stat,
-        "market": str(stat).lower().replace(" ", "_"),
-        "line": line_val,
-        "game_time": start_time,
-        "projection_type": "main",
-        "tier": tier,
-        # Generic odds fields – PrizePicks has no odds, so leave them blank
-        "over_odds": "",
-        "under_odds": "",
-        # Keep Underdog-specific keys for compatibility
-        "ud_american_over": None,
-        "ud_american_under": None,
-    }
-)
-
+            # PrizePicks has no explicit odds; keep generic fields empty
+            props.append(
+                {
+                    "id": pid,
+                    "source": "prizepicks",
+                    "board": sport_name,
+                    "league": league,
+                    "sport": sport_name,
+                    "sport_slug": sport_slug,
+                    "player": player,
+                    "team": team,
+                    "opponent": opponent,
+                    "stat": stat,
+                    "market": str(stat).lower().replace(" ", "_"),
+                    "line": line_val,
+                    "game_time": start_time,
+                    "projection_type": "main",
+                    "tier": tier,
+                    # generic odds fields
+                    "over_odds": "",
+                    "under_odds": "",
+                    # compatibility with Underdog structure
+                    "ud_american_over": None,
+                    "ud_american_under": None,
+                }
+            )
         except Exception:
             # Skip malformed entries rather than killing the whole upload
             continue
@@ -493,33 +493,31 @@ def normalize_underdog(
 
             market = stat_code or stat_display.replace(" ", "_").lower() or "unknown"
 
-                        props.append(
-    {
-        "id": line.get("id"),
-        "source": "underdog",
-        "board": sport_name,
-        "league": sport_name,
-        "sport": sport_name,
-        "sport_slug": sport_slug,
-        "player": player_name,
-        "team": "",
-        "opponent": matchup,
-        "stat": stat_display or stat_code,
-        "market": market,
-        "line": line_val,
-        "game_time": game_time,
-        "projection_type": "main",
-        "tier": "standard",
-        # Generic odds fields for downstream use
-        "over_odds": over_price or "",
-        "under_odds": under_price or "",
-        # Keep original Underdog fields
-        "ud_american_over": over_price,
-        "ud_american_under": under_price,
-    }
-)
-
-
+            props.append(
+                {
+                    "id": line.get("id"),
+                    "source": "underdog",
+                    "board": sport_name,
+                    "league": sport_name,
+                    "sport": sport_name,
+                    "sport_slug": sport_slug,
+                    "player": player_name,
+                    "team": "",
+                    "opponent": matchup,
+                    "stat": stat_display or stat_code,
+                    "market": market,
+                    "line": line_val,
+                    "game_time": game_time,
+                    "projection_type": "main",
+                    "tier": "standard",
+                    # generic odds fields for downstream use
+                    "over_odds": over_price or "",
+                    "under_odds": under_price or "",
+                    # keep original Underdog-specific fields
+                    "ud_american_over": over_price,
+                    "ud_american_under": under_price,
+                }
+            )
         except Exception:
             continue
 
@@ -545,18 +543,21 @@ def _model_csv_val(v: Any) -> str:
     parts = s.split()
     return "_".join(parts)
 
-def _encode_prop_as_word_from_csv_row(row: Dict[str, str]) -> str:
-    """
-    Turn a CSV row dict into a single no-space string for HTML view pages.
 
-    New format (with odds at the end):
+def _encode_prop_as_word_from_csv_row(row: Dict[str, Any]) -> str:
+    """
+    Turn a prop dict (or CSV row dict) into a single no-space token string.
+
+    Format:
       sport|player|team|opponent|stat|line|tier|game_time|over_odds|under_odds
+
+    Spaces inside fields are collapsed to underscores; '|' is not allowed and
+    will be replaced with '/'.
     """
     def clean(s: Any) -> str:
         val = str(s or "")
-        # avoid breaking our pipe format
+        # avoid breaking the pipe-delimited structure
         val = val.replace("|", "/").replace("\n", " ").strip()
-        # collapse all whitespace to underscores so there are NO spaces
         parts = val.split()
         return "_".join(parts)
 
@@ -1053,6 +1054,9 @@ def _build_model_page_text(
 ) -> str:
     """
     Build a single CSV page for the model-board endpoints.
+
+    Columns:
+      sport,player,team,opponent,stat,line,tier,game_time,over_odds,under_odds
     """
     if page < 1:
         raise HTTPException(status_code=400, detail="Page must be >= 1")
@@ -1060,7 +1064,7 @@ def _build_model_page_text(
     filtered = _filter_props_for_board(sport_key, tiers_str)
     total = len(filtered)
     if total == 0:
-        return "sport,player,team,opponent,stat,line,tier,game_time\n"
+        return "sport,player,team,opponent,stat,line,tier,game_time,over_odds,under_odds\n"
 
     total_pages = (total + page_size - 1) // page_size
     if page > total_pages:
@@ -1073,27 +1077,26 @@ def _build_model_page_text(
     end = start + page_size
     page_props = filtered[start:end]
 
-        lines: List[str] = []
+    lines: List[str] = []
     header = "sport,player,team,opponent,stat,line,tier,game_time,over_odds,under_odds"
-lines.append(header)
+    lines.append(header)
 
-for p in page_props:
-    line = ",".join(
-        [
-            _model_csv_val(p.get("sport", "")),
-            _model_csv_val(p.get("player", "")),
-            _model_csv_val(p.get("team", "")),
-            _model_csv_val(p.get("opponent", "")),
-            _model_csv_val(p.get("stat", "")),
-            str(p.get("line", "")),
-            _model_csv_val(p.get("tier", "")),
-            _model_csv_val(p.get("game_time", "")),
-            _model_csv_val(p.get("over_odds", "")),
-            _model_csv_val(p.get("under_odds", "")),
-        ]
-    )
-    lines.append(line)
-
+    for p in page_props:
+        line = ",".join(
+            [
+                _model_csv_val(p.get("sport", "")),
+                _model_csv_val(p.get("player", "")),
+                _model_csv_val(p.get("team", "")),
+                _model_csv_val(p.get("opponent", "")),
+                _model_csv_val(p.get("stat", "")),
+                str(p.get("line", "")),
+                _model_csv_val(p.get("tier", "")),
+                _model_csv_val(p.get("game_time", "")),
+                _model_csv_val(p.get("over_odds", "")),
+                _model_csv_val(p.get("under_odds", "")),
+            ]
+        )
+        lines.append(line)
 
     return "\n".join(lines)
 
@@ -1131,7 +1134,7 @@ def model_board_paged(
     return PlainTextResponse(text)
 
 # -------------------------------------------------------------------
-# Model-board HTML view (for ChatGPT)
+# Model-board HTML view (for ChatGPT – token format)
 # -------------------------------------------------------------------
 
 
@@ -1144,6 +1147,12 @@ def model_board_view_html(
 ):
     """
     HTML view of a slice of the board, used by ChatGPT.
+
+    Each line in the <pre> block is a single token:
+
+      sport|player|team|opponent|stat|line|tier|game_time|over_odds|under_odds
+
+    There are NO spaces in the token; internal spaces are converted to underscores.
     """
     sport_slug = (sport or "").lower()
     filtered = _filter_props_for_board(sport_slug, tiers or None)
@@ -1167,6 +1176,7 @@ def model_board_view_html(
         end = start + PAGE_SIZE
         page_props = filtered[start:end]
 
+    # Derive label from props
     label = ""
     for p in filtered:
         label = (p.get("sport") or p.get("league") or "").strip()
@@ -1178,39 +1188,14 @@ def model_board_view_html(
     tier_param = (tiers or "").strip()
     tier_desc = f" · tier={tier_param}" if tier_param else ""
 
-    rows_html = ""
+    # Build tokens
     if not page_props:
-        rows_html = "<tr><td colspan='9'>No props on this page.</td></tr>"
+        token_lines = []
     else:
-        for p in page_props:
-            tier_raw = str(p.get("tier", "")).lower()
-            tier_label = tier_raw.capitalize() if tier_raw else ""
-            tier_class = ""
-            if tier_raw == "goblin":
-                tier_class = " tier-goblin"
-            elif tier_raw == "demon":
-                tier_class = " tier-demon"
-
-            ud_over = p.get("ud_american_over") or ""
-            ud_under = p.get("ud_american_under") or ""
-            if ud_over or ud_under:
-                odds_text = f"{ud_over or '?'} / {ud_under or '?'}"
-            else:
-                odds_text = ""
-
-            rows_html += f"""
-            <tr>
-              <td>{p.get("player","")}</td>
-              <td>{p.get("team","")}</td>
-              <td>{p.get("opponent","")}</td>
-              <td>{p.get("stat","")}</td>
-              <td>{p.get("line","")}</td>
-              <td>{odds_text}</td>
-              <td><span class="pill{tier_class}">{tier_label}</span></td>
-              <td><span class="pill time">{p.get("game_time","")}</span></td>
-              <td><span class="pill league">{p.get("sport","")}</span></td>
-            </tr>
-            """
+        token_lines = [
+            _encode_prop_as_word_from_csv_row(p) for p in page_props
+        ]
+    tokens_block = "\n".join(token_lines)
 
     prev_link = ""
     next_link = ""
@@ -1274,59 +1259,14 @@ def model_board_view_html(
             margin-bottom: 0.75rem;
             flex-wrap: wrap;
           }}
-          .table-wrapper {{
+          pre {{
             border-radius: 0.75rem;
             border: 1px solid #1f2937;
-            overflow: hidden;
+            padding: 0.75rem;
             background: #020617;
-          }}
-          table {{
-            width: 100%;
-            border-collapse: collapse;
             font-size: 0.8rem;
-          }}
-          thead {{
-            background: #111827;
-          }}
-          thead th {{
-            text-align: left;
-            padding: 0.5rem 0.6rem;
-            white-space: nowrap;
-            font-weight: 500;
-            color: #e5e7eb;
-            border-bottom: 1px solid #1f2937;
-          }}
-          tbody td {{
-            padding: 0.45rem 0.6rem;
-            border-bottom: 1px solid #111827;
-          }}
-          tbody tr:nth-child(even) {{ background-color: #020617; }}
-          tbody tr:nth-child(odd) {{ background-color: #020617; }}
-          tbody tr:hover {{ background-color: #111827; }}
-          .pill {{
-            display: inline-flex;
-            align-items: center;
-            padding: 0.15rem 0.5rem;
-            border-radius: 9999px;
-            font-size: 0.7rem;
-            border: 1px solid #4b5563;
-            color: #e5e7eb;
-          }}
-          .pill.tier-goblin {{
-            border-color: #fbbf24;
-            color: #fbbf24;
-          }}
-          .pill.tier-demon {{
-            border-color: #f97373;
-            color: #fecaca;
-          }}
-          .pill.time {{
-            border-color: #facc15;
-            color: #facc15;
-          }}
-          .pill.league {{
-            border-color: #22c55e;
-            color: #bbf7d0;
+            overflow-x: auto;
+            white-space: pre;
           }}
           .pager {{
             margin-top: 0.6rem;
@@ -1347,28 +1287,13 @@ def model_board_view_html(
             <a href="/model-index-main">← Back to Model Index Hub</a>
           </div>
           <h1>{label} props · page {page}{tier_desc}</h1>
-          <p>HTML view of this slice of the board. Each row is one prop.</p>
+          <p>
+            Each line below is one prop token, with fields:
+            <code>sport|player|team|opponent|stat|line|tier|game_time|over_odds|under_odds</code>.
+            Internal spaces are replaced by underscores.
+          </p>
 
-          <div class="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>Player</th>
-                  <th>Team</th>
-                  <th>Opponent / Matchup</th>
-                  <th>Stat</th>
-                  <th>Line</th>
-                  <th>UD Odds (O/U)</th>
-                  <th>Tier</th>
-                  <th>Game Time</th>
-                  <th>Sport</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows_html}
-              </tbody>
-            </table>
-          </div>
+          <pre>{tokens_block}</pre>
           {pager_html}
           <div class="pager-links">
             {prev_link}
@@ -1482,7 +1407,7 @@ def model_index_main():
           <p>
             This page lists the available sport/tier categories. Each link goes to a
             <code>/model-index?sport=...&amp;tier=...</code> page, which in turn lists
-            HTML model-board pages like <code>/model-board-view/nba/page/1?tiers=standard</code>.
+            HTML token pages like <code>/model-board-view/nba/page/1?tiers=standard</code>.
           </p>
     """
 
@@ -1629,8 +1554,8 @@ def model_index(sport: str = "", tier: str = ""):
         <main>
           <h1>Model Board Index</h1>
           <p>
-            This page lists the <code>/model-board-view/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code> HTML URLs
-            for the selected sport/tier slice.
+            This page lists the <code>/model-board-view/&lt;sport&gt;/page/&lt;n&gt;?tiers=...</code> HTML
+            token URLs for the selected sport/tier slice.
           </p>
           <p><a href="/model-index-main">← Back to Model Index Hub</a></p>
     """
@@ -2317,6 +2242,8 @@ def model_board_json(
                 "line": p.get("line"),
                 "tier": p.get("tier"),
                 "game_time": p.get("game_time"),
+                "over_odds": p.get("over_odds", ""),
+                "under_odds": p.get("under_odds", ""),
                 "ud_american_over": p.get("ud_american_over"),
                 "ud_american_under": p.get("ud_american_under"),
             }
