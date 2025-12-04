@@ -39,9 +39,9 @@ UNDERDOG_SPORT_IDS: Dict[str, str] = {
     "nhl": "NHL",
     "cbb": "CBB",
     "cfb": "CFB",
-    "soccer": "FIFA",   # soccer -> "FIFA"
+    "soccer": "FIFA",   # user note: soccer -> "FIFA"
     "tennis": "TENNIS",
-    "cs2": "CS",        # cs2 -> "CS"
+    "cs2": "CS",        # user note: cs2 -> "CS"
 }
 
 ALLOWED_TIERS = {"standard", "goblin", "demon"}
@@ -351,27 +351,32 @@ def normalize_prizepicks(
             if not player or line_val is None or not stat:
                 continue
 
-            props.append(
-                {
-                    "id": pid,
-                    "source": "prizepicks",
-                    "board": sport_name,
-                    "league": league,
-                    "sport": sport_name,
-                    "sport_slug": sport_slug,
-                    "player": player,
-                    "team": team,
-                    "opponent": opponent,
-                    "stat": stat,
-                    "market": str(stat).lower().replace(" ", "_"),
-                    "line": line_val,
-                    "game_time": start_time,
-                    "projection_type": "main",
-                    "tier": tier,
-                    "ud_american_over": None,
-                    "ud_american_under": None,
-                }
-            )
+                        props.append(
+    {
+        "id": pid,
+        "source": "prizepicks",
+        "board": sport_name,
+        "league": league,
+        "sport": sport_name,
+        "sport_slug": sport_slug,
+        "player": player,
+        "team": team,
+        "opponent": opponent,
+        "stat": stat,
+        "market": str(stat).lower().replace(" ", "_"),
+        "line": line_val,
+        "game_time": start_time,
+        "projection_type": "main",
+        "tier": tier,
+        # Generic odds fields – PrizePicks has no odds, so leave them blank
+        "over_odds": "",
+        "under_odds": "",
+        # Keep Underdog-specific keys for compatibility
+        "ud_american_over": None,
+        "ud_american_under": None,
+    }
+)
+
         except Exception:
             # Skip malformed entries rather than killing the whole upload
             continue
@@ -394,9 +399,7 @@ def normalize_underdog(
 
     if sport_key == "extras":
         if not sport_label:
-            raise ValueError(
-                "When uploading as 'extras', you must provide a 'sport_label' (e.g. 'Badminton')."
-            )
+            raise ValueError("When uploading as 'extras', you must provide a 'sport_label' (e.g. 'Badminton').")
         sport_name = sport_label.strip()
         if not sport_name:
             raise ValueError("Custom sport label cannot be empty.")
@@ -490,27 +493,33 @@ def normalize_underdog(
 
             market = stat_code or stat_display.replace(" ", "_").lower() or "unknown"
 
-            props.append(
-                {
-                    "id": line.get("id"),
-                    "source": "underdog",
-                    "board": sport_name,
-                    "league": sport_name,
-                    "sport": sport_name,
-                    "sport_slug": sport_slug,
-                    "player": player_name,
-                    "team": "",
-                    "opponent": matchup,
-                    "stat": stat_display or stat_code,
-                    "market": market,
-                    "line": line_val,
-                    "game_time": game_time,
-                    "projection_type": "main",
-                    "tier": "standard",
-                    "ud_american_over": over_price,
-                    "ud_american_under": under_price,
-                }
-            )
+                        props.append(
+    {
+        "id": line.get("id"),
+        "source": "underdog",
+        "board": sport_name,
+        "league": sport_name,
+        "sport": sport_name,
+        "sport_slug": sport_slug,
+        "player": player_name,
+        "team": "",
+        "opponent": matchup,
+        "stat": stat_display or stat_code,
+        "market": market,
+        "line": line_val,
+        "game_time": game_time,
+        "projection_type": "main",
+        "tier": "standard",
+        # Generic odds fields for downstream use
+        "over_odds": over_price or "",
+        "under_odds": under_price or "",
+        # Keep original Underdog fields
+        "ud_american_over": over_price,
+        "ud_american_under": under_price,
+    }
+)
+
+
         except Exception:
             continue
 
@@ -535,6 +544,36 @@ def _model_csv_val(v: Any) -> str:
     s = str(v).replace(",", " ").replace("\n", " ").strip()
     parts = s.split()
     return "_".join(parts)
+
+def _encode_prop_as_word_from_csv_row(row: Dict[str, str]) -> str:
+    """
+    Turn a CSV row dict into a single no-space string for HTML view pages.
+
+    New format (with odds at the end):
+      sport|player|team|opponent|stat|line|tier|game_time|over_odds|under_odds
+    """
+    def clean(s: Any) -> str:
+        val = str(s or "")
+        # avoid breaking our pipe format
+        val = val.replace("|", "/").replace("\n", " ").strip()
+        # collapse all whitespace to underscores so there are NO spaces
+        parts = val.split()
+        return "_".join(parts)
+
+    return "|".join(
+        [
+            clean(row.get("sport", "")),
+            clean(row.get("player", "")),
+            clean(row.get("team", "")),
+            clean(row.get("opponent", "")),
+            clean(row.get("stat", "")),
+            clean(row.get("line", "")),
+            clean(row.get("tier", "")),
+            clean(row.get("game_time", "")),
+            clean(row.get("over_odds", "")),
+            clean(row.get("under_odds", "")),
+        ]
+    )
 
 # -------------------------------------------------------------------
 # Health
@@ -1034,24 +1073,27 @@ def _build_model_page_text(
     end = start + page_size
     page_props = filtered[start:end]
 
-    lines: List[str] = []
-    header = "sport,player,team,opponent,stat,line,tier,game_time"
-    lines.append(header)
+        lines: List[str] = []
+    header = "sport,player,team,opponent,stat,line,tier,game_time,over_odds,under_odds"
+lines.append(header)
 
-    for p in page_props:
-        line = ",".join(
-            [
-                _model_csv_val(p.get("sport", "")),
-                _model_csv_val(p.get("player", "")),
-                _model_csv_val(p.get("team", "")),
-                _model_csv_val(p.get("opponent", "")),
-                _model_csv_val(p.get("stat", "")),
-                str(p.get("line", "")),
-                _model_csv_val(p.get("tier", "")),
-                _model_csv_val(p.get("game_time", "")),
-            ]
-        )
-        lines.append(line)
+for p in page_props:
+    line = ",".join(
+        [
+            _model_csv_val(p.get("sport", "")),
+            _model_csv_val(p.get("player", "")),
+            _model_csv_val(p.get("team", "")),
+            _model_csv_val(p.get("opponent", "")),
+            _model_csv_val(p.get("stat", "")),
+            str(p.get("line", "")),
+            _model_csv_val(p.get("tier", "")),
+            _model_csv_val(p.get("game_time", "")),
+            _model_csv_val(p.get("over_odds", "")),
+            _model_csv_val(p.get("under_odds", "")),
+        ]
+    )
+    lines.append(line)
+
 
     return "\n".join(lines)
 
@@ -1179,16 +1221,10 @@ def model_board_view_html(
     if total > 0:
         if page > 1:
             prev_page = page - 1
-            prev_link = (
-                f"<a href='/model-board-view/{sport_slug}/page/{prev_page}{base_query}'>"
-                "← Prev page</a>"
-            )
+            prev_link = f"<a href='/model-board-view/{sport_slug}/page/{prev_page}{base_query}'>← Prev page</a>"
         if page < total_pages:
             next_page = page + 1
-            next_link = (
-                f"<a href='/model-board-view/{sport_slug}/page/{next_page}{base_query}'>"
-                "Next page →</a>"
-            )
+            next_link = f"<a href='/model-board-view/{sport_slug}/page/{next_page}{base_query}'>Next page →</a>"
 
     pager_html = ""
     if total > 0:
@@ -1865,10 +1901,7 @@ async def update_props(request: Request):
     if not isinstance(raw, dict):
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Field 'raw' must be a JSON object containing either PrizePicks "
-                "(data+included) or Underdog (games+over_under_lines) payload."
-            ),
+            detail="Field 'raw' must be a JSON object containing either PrizePicks (data+included) or Underdog (games+over_under_lines) payload.",
         )
 
     # Detect source type
@@ -2220,16 +2253,10 @@ async def export_data(request: Request):
 def model_board_json(
     sports: str = "all",
     tiers: str = "",
-    mode: str = "json",
 ):
     """
-    JSON (or text) version of the model board (for your own scripts).
-
-    Query params:
-      - sports: "all" or comma-separated sport keys (nba,nfl,...)
-      - tiers:  "standard", "goblin", "demon", or combos like "standard+goblin"
-      - mode:   "json" (default) → JSONResponse
-                "text"           → CSV-ish PlainTextResponse that ChatGPT can read
+    JSON version of the model board (for your own scripts).
+    Note: the ChatGPT browsing sandbox does NOT expose JSON bodies to me.
     """
     if sports.lower() == "all":
         selected_keys = set(SPORTS.keys())
@@ -2251,10 +2278,7 @@ def model_board_json(
             if t not in ALLOWED_TIERS:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Invalid tier '{t}'. Allowed: standard, goblin, demon, "
-                        "or combos like standard+goblin."
-                    ),
+                    detail=f"Invalid tier '{t}'. Allowed: standard, goblin, demon, or combos like standard+goblin.",
                 )
             tier_set.add(t)
     if not tier_set:
@@ -2297,35 +2321,5 @@ def model_board_json(
                 "ud_american_under": p.get("ud_american_under"),
             }
         )
-
-    # New: allow a plain-text mode for ChatGPT-style consumption
-    if mode.lower() == "text":
-        lines: List[str] = []
-        header = (
-            "sport,player,team,opponent,stat,market,line,"
-            "tier,game_time,ud_american_over,ud_american_under"
-        )
-        lines.append(header)
-
-        for p in result:
-            line = ",".join(
-                [
-                    _clean_csv_val(p.get("sport", "")),
-                    _clean_csv_val(p.get("player", "")),
-                    _clean_csv_val(p.get("team", "")),
-                    _clean_csv_val(p.get("opponent", "")),
-                    _clean_csv_val(p.get("stat", "")),
-                    _clean_csv_val(p.get("market", "")),
-                    str(p.get("line", "")),
-                    _clean_csv_val(p.get("tier", "")),
-                    _clean_csv_val(p.get("game_time", "")),
-                    _clean_csv_val(p.get("ud_american_over", "")),
-                    _clean_csv_val(p.get("ud_american_under", "")),
-                ]
-            )
-            lines.append(line)
-
-        text = "\n".join(lines)
-        return PlainTextResponse(text)
 
     return JSONResponse(result)
